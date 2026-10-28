@@ -64,7 +64,7 @@ wrong or 10-100x slower. Each one now has an automatic check in the framework. R
   expected writes are estimated from the model size and the run refuses to start if the disk is too
   small (`preflight.check_disk`).
 
-## Libraries
+## Libraries and models
 
 ### 9. Version combinations that do not fit
 - **Symptom.** pip resolved transformers 5.x next to vLLM 0.11 (released before transformers 5); TRL 0.24
@@ -73,21 +73,34 @@ wrong or 10-100x slower. Each one now has an automatic check in the framework. R
   are rendered by the framework, independent of the TRL version; warmup is passed in the form the
   installed transformers expects. `doctor` lists every version.
 
+### 10. Code that only fits one model family
+- **Symptom.** With a non-Qwen student: memory estimation crashed on gpt2, whose config says `n_layer`
+  and `n_head` where Qwen and Llama say `num_hidden_layers` and `num_attention_heads`; SFT, evaluation
+  and GRPO failed on base models, which have no chat template; on a Mac, gpt2 SFT failed with
+  "scaled_dot_product_attention for MPS does not support dropout".
+- **Cause.** Field names, chat templates and attention variants (grouped-query, multi-query) differ
+  between families. Without CUDA, transformers picks Apple's MPS backend, which lacks some operations.
+- **Guard.** `memory.model_dims` reads sizes under each family's names (and handles multi-query and
+  multimodal configs); `chat.prepare_tokenizer` gives template-less models a plain template whose
+  replies end with EOS, and the template is saved with the trained model; SFT counts rows whose
+  completion's first token merges into the prompt (`prompt_boundary_mismatch`); training runs on the
+  CPU when there is no CUDA GPU, matching what `doctor` reports. Tested with gpt2 and SmolLM2.
+
 ## Reinforcement learning
 
-### 10. GRPO on prompts that are always right or always wrong learns nothing
+### 11. GRPO on prompts that are always right or always wrong learns nothing
 - With all completions equally rewarded, the group-normalised advantage is zero. On recommendation only
   5.4% of prompts were "sometimes right"; on GSM8K, 64.7%.
 - **Guard.** `grpo --filter-samples 8` measures this first, keeps only the useful prompts and prints
   advice (`grpo.diagnose_pass_rates`); `--epochs` sizes the run to the number of kept prompts.
 
-### 11. Entropy collapse
+### 12. Entropy collapse
 - **Symptom.** Training reward rose from 0.41 to 0.93 within ~65 steps while token entropy fell from 0.87
   to 0.002: the policy repeated one memorised answer per training prompt.
 - **Guard.** Training stops when entropy stays below `entropy_floor_ratio` (10%) of its own starting
   value for `entropy_patience` logs. The threshold is relative because entropy scales differ by task.
 
-### 12. Training reward rises while held-out quality falls
+### 13. Training reward rises while held-out quality falls
 - **Symptom.** The collapsed run above lowered HR@20 on new users from .172 to .162; a KL-regularised run
   stopped the drop but did not improve on the start.
 - **Guard.** Validation-based checkpoint selection: every `eval_every` steps, greedy generation on
@@ -96,16 +109,16 @@ wrong or 10-100x slower. Each one now has an automatic check in the framework. R
 
 ## Experiment design
 
-### 13. Comparing only with the untrained model overstates the teacher
+### 14. Comparing only with the untrained model overstates the teacher
 - In one experiment, an untrained model at 0.103 rose to 0.124 after training on teacher reasoning, which
   looked like a 20% gain; training on the plain labels of the same examples reached 0.138. Compare
   against a same-data, no-teacher control (`python -m distillops labels`) to see what the teacher adds.
 
-### 14. Teachers break instructions in ways that teach the wrong thing
+### 15. Teachers break instructions in ways that teach the wrong thing
 - A teacher told not to mention information the student will never see did so in about 12% of its
   answers. `Task.verify` is where such outputs are rejected; read accepted samples before scaling up.
 
-### 15. A dependency the step does not need
+### 16. A dependency the step does not need
 - Loading training examples also read a file needed only to build teacher prompts, so a later stage
   failed on a machine without it. Tasks now read such files only where they are needed and fail with a
   message that says how to create them.

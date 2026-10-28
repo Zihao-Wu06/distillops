@@ -20,7 +20,8 @@ def title_embeddings(model_path: str, titles: Sequence[str], batch_size: int = 0
     import torch
     from transformers import AutoModel, AutoTokenizer
 
-    from distillops.memory import adaptive_chunks, max_sequences
+    from distillops.chat import device
+    from distillops.memory import adaptive_chunks, max_sequences, model_dims
 
     tok = AutoTokenizer.from_pretrained(model_path)
     tok.padding_side = "right"
@@ -28,15 +29,15 @@ def title_embeddings(model_path: str, titles: Sequence[str], batch_size: int = 0
         tok.pad_token = tok.eos_token
     from distillops.precision import compute_dtype
 
-    model = AutoModel.from_pretrained(model_path, dtype=compute_dtype(), device_map="cuda").eval()
+    model = AutoModel.from_pretrained(model_path, dtype=compute_dtype(), device_map=device()).eval()
     lengths = [len(tok(t, add_special_tokens=False)["input_ids"]) for t in titles]
     order = sorted(range(len(titles)), key=lambda i: -lengths[i])
     batch_size = batch_size or max_sequences(model, max(lengths) if lengths else 1)
-    out = np.zeros((len(titles), model.config.hidden_size), dtype=np.float32)
+    out = np.zeros((len(titles), model_dims(model.config)["hidden"]), dtype=np.float32)
 
     def chunk(a: int, b: int) -> None:
         idx = order[a:b]
-        enc = tok([titles[i] for i in idx], return_tensors="pt", padding=True, add_special_tokens=False).to("cuda")
+        enc = tok([titles[i] for i in idx], return_tensors="pt", padding=True, add_special_tokens=False).to(model.device)
         with torch.no_grad():
             h = model(**enc).last_hidden_state.float()  # [B, T, H]
         m = enc["attention_mask"].unsqueeze(-1).float()

@@ -43,6 +43,7 @@ class GRPORunConfig:
     logging_steps: int = 5
     save_steps: int = 100
     chat_template_kwargs: dict[str, Any] = field(default_factory=dict)  # e.g. {"enable_thinking": false}
+    chat_template: str | None = None  # None = the model's own; "plain", a Jinja file or string (chat.py)
     # Entropy-collapse guard, relative to the run's own starting entropy (entropy scales differ
     # across tasks, so no absolute threshold): stop when entropy stays below
     # entropy_floor_ratio x the first logged value for `entropy_patience` logs. 0 disables.
@@ -78,6 +79,7 @@ def estimate_pass_rates(
     max_tokens: int = 256,
     chat_template_kwargs: dict[str, Any] | None = None,
     gpu_memory_utilization: float = 0.85,
+    chat_template: str | None = None,
 ) -> tuple[list[float], dict[str, Any]]:
     """Sample `n` completions per prompt with vLLM (the same sampling GRPO will use) and
     score them with the task. Returns per-example pass rates and summary statistics."""
@@ -89,7 +91,9 @@ def estimate_pass_rates(
     from .precision import compute_dtype, dtype_name
 
     llm = LLM(model=model, dtype=dtype_name(compute_dtype()), gpu_memory_utilization=gpu_memory_utilization, seed=0)
-    tok = llm.get_tokenizer()
+    from .chat import prepare_tokenizer
+
+    tok = prepare_tokenizer(llm.get_tokenizer(), chat_template, model)
     prompts = [
         tok.apply_chat_template(task.student_messages(ex), tokenize=False, add_generation_prompt=True,
                                 **(chat_template_kwargs or {}))
@@ -411,14 +415,14 @@ def train(
         log_completions=True,  # inspect real outputs: the first defence against reward hacking
         # Full fine-tuning checkpoints with optimizer state are ~5x the model size (a 1.7B run
         # filled a 50GB disk); RL runs are short, so keep weights only and one checkpoint.
-        **{"save_only_model": True, "save_total_limit": 1, **{k: v for k, v in cfg.extra.items()
-                                                              if k in ("save_only_model", "save_total_limit")}},
+        **{"save_only_model": True, "save_total_limit": 1, "use_cpu": prec["use_cpu"],
+           **{k: v for k, v in cfg.extra.items() if k in ("save_only_model", "save_total_limit", "use_cpu")}},
         seed=cfg.seed,
         report_to="none",
         # fp32 master weights for full fine-tuning, low-precision compute (distillops/precision.py)
         model_init_kwargs={"dtype": prec["model_dtype"]},
         reward_weights=list(reward_weights) if reward_weights else None,
-        **{k: v for k, v in cfg.extra.items() if k not in ("save_only_model", "save_total_limit")},
+        **{k: v for k, v in cfg.extra.items() if k not in ("save_only_model", "save_total_limit", "use_cpu")},
     )
     guard = entropy_guard(cfg.entropy_floor_ratio, cfg.entropy_patience)
     callbacks = [guard]
@@ -429,8 +433,12 @@ def train(
             lambda model: evaluator(model, holder["trainer"].processing_class),
             cfg.eval_every, cfg.eval_patience, lambda: holder["trainer"].save_model(cfg.output_dir))
         callbacks.append(selector)
+    from .chat import load_tokenizer
+
+    tok = load_tokenizer(cfg.model, cfg.chat_template)
+    tok.padding_side = "left"  # TRL's GRPO pads prompts on the left
     trainer = GRPOTrainer(
-        model=cfg.model, reward_funcs=list(reward_funcs), args=args,
+        model=cfg.model, reward_funcs=list(reward_funcs), args=args, processing_class=tok,
         train_dataset=Dataset.from_list(rows), peft_config=peft_config, callbacks=callbacks,
     )
     holder["trainer"] = trainer

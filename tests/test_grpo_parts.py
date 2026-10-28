@@ -54,6 +54,7 @@ def test_precision_settings_cpu_fallback():
     s = train_settings(full_finetune=True)
     assert s["model_dtype"] == torch.float32  # full fine-tuning always keeps fp32 master weights
     assert not (s["bf16"] and s["fp16"])
+    assert s["use_cpu"] == (not torch.cuda.is_available())  # no CUDA: CPU, not Apple's MPS
 
 
 def test_entropy_guard_is_relative_to_the_starting_entropy():

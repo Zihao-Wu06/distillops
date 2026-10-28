@@ -1,4 +1,5 @@
-# Generic LoRA SFT config for a Qwen3 student (any task). Override --train_file, --output_dir, --model.
+# Generic LoRA SFT config (any task). Qwen3 is the included examples' student; any causal LM works:
+# set model or pass --model (README: Student model). Override --train_file, --output_dir, --model.
 model: Qwen/Qwen3-0.6B
 train_file: results/gsm8k/teacher_train_n0/accepted.jsonl
 output_dir: checkpoints/qwen3_0.6b_sft

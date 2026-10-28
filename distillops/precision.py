@@ -46,6 +46,9 @@ def train_settings(full_finetune: bool) -> dict[str, Any]:
         "model_dtype": torch.float32 if (full_finetune or comp == torch.float32) else comp,
         "bf16": comp == torch.bfloat16,
         "fp16": comp == torch.float16,
+        # Without CUDA, train on the CPU as reported by describe(); transformers would otherwise pick
+        # Apple's MPS backend, where some ops fail (e.g. attention dropout, used by gpt2).
+        "use_cpu": not torch.cuda.is_available(),
     }
 
 

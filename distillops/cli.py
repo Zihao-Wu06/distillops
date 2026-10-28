@@ -24,6 +24,8 @@ from typing import Any
 
 import yaml
 
+CHAT_TEMPLATE_HELP = ("'plain', a Jinja file or a Jinja string; default: the model's own template, "
+                      "or 'plain' if it has none (see distillops/chat.py)")
 
 
 def load_task(spec: str, task_args: list[str] | None = None) -> Any:
@@ -80,7 +82,7 @@ def cmd_sft(a: argparse.Namespace) -> None:
     from .sft import SFTRunConfig, train
 
     cfg = SFTRunConfig.from_yaml(a.config, train_file=a.train_file, output_dir=a.output_dir, model=a.model,
-                                 epochs=a.epochs)
+                                 epochs=a.epochs, chat_template=a.chat_template)
     res = train(cfg)
     write_json(Path(cfg.output_dir) / "sft_summary.json", res)
     print(res)
@@ -91,6 +93,8 @@ def cmd_eval(a: argparse.Namespace) -> None:
     examples = subsample(task.load_examples(a.split), a.n, a.seed)
     out = Path(a.out or f"results/{task.name}/eval/{a.tag or Path(a.model).name}")
     gen = {"max_new_tokens": a.max_new_tokens, "batch_size": a.batch, "enable_thinking": not a.no_think}
+    if a.chat_template:  # only when set: tasks that override evaluate() need not accept it
+        gen["chat_template"] = a.chat_template
     metrics = task.evaluate(a.model, examples, out, **gen)
     print(metrics)
 
@@ -113,7 +117,7 @@ def cmd_grpo(a: argparse.Namespace) -> None:
                        steps_for_epochs, task_rows_and_reward, train)
     from .io import write_json
 
-    cfg = GRPORunConfig.from_yaml(a.config)
+    cfg = GRPORunConfig.from_yaml(a.config, model=a.model, chat_template=a.chat_template)
     task = load_task(a.task, a.task_arg)
     if a.max_steps:
         cfg.max_steps = a.max_steps
@@ -137,7 +141,8 @@ def cmd_grpo(a: argparse.Namespace) -> None:
         rates, stats = estimate_pass_rates(cfg.model, task, examples, n=a.filter_samples, temperature=cfg.temperature,
                                            max_tokens=cfg.max_completion_length,
                                            chat_template_kwargs=cfg.chat_template_kwargs,
-                                           gpu_memory_utilization=a.filter_gpu_memory)
+                                           gpu_memory_utilization=a.filter_gpu_memory,
+                                           chat_template=cfg.chat_template)
         examples = [ex for ex, r in zip(examples, rates) if 0 < r < 1]
         stats["advice"] = diagnose_pass_rates(stats)
         print("pass-rate filter:", json.dumps(stats), f"-> {len(examples)} prompts kept", flush=True)
@@ -153,9 +158,9 @@ def cmd_grpo(a: argparse.Namespace) -> None:
         print(f"{len(examples)} prompts x {a.epochs} epochs -> {cfg.max_steps} steps", flush=True)
     render = None
     if cfg.chat_template_kwargs:  # render prompts ourselves: works whatever TRL version is installed
-        from transformers import AutoTokenizer
+        from .chat import load_tokenizer
 
-        tok = AutoTokenizer.from_pretrained(cfg.model)
+        tok = load_tokenizer(cfg.model, cfg.chat_template)
         render = lambda m: tok.apply_chat_template(m, tokenize=False, add_generation_prompt=True,  # noqa: E731
                                                    **cfg.chat_template_kwargs)
     rows, reward = task_rows_and_reward(task, examples, render)
@@ -224,6 +229,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--output_dir")
     p.add_argument("--model")
     p.add_argument("--epochs", type=float)
+    p.add_argument("--chat-template", help=CHAT_TEMPLATE_HELP)
     p.set_defaults(fn=cmd_sft)
 
     p = sub.add_parser("eval", help="generate with a student and score with the task")
@@ -234,6 +240,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--max-new-tokens", type=int, default=512)
     p.add_argument("--batch", type=int, default=0, help="prompts per batch; 0 = auto from free GPU memory")
     p.add_argument("--no-think", action="store_true", help="disable the chat template's thinking mode")
+    p.add_argument("--chat-template", help=CHAT_TEMPLATE_HELP)
     p.set_defaults(fn=cmd_eval)
 
     p = sub.add_parser("grpo", help="GRPO with the task's score as reward")
@@ -250,6 +257,8 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--eval-every", type=int, help="validation check every N steps (0 = off); overrides the config")
     p.add_argument("--eval-examples", type=int, help="number of validation prompts; overrides the config")
     p.add_argument("--output_dir", help="override output_dir")
+    p.add_argument("--model", help="override the starting model (any causal LM: hub id or local path)")
+    p.add_argument("--chat-template", help=CHAT_TEMPLATE_HELP)
     p.set_defaults(fn=cmd_grpo)
 
     p = sub.add_parser("merge", help="merge a LoRA adapter into its base model")

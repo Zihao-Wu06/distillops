@@ -57,6 +57,8 @@ and the GRPO reward, so reinforcement learning optimises exactly what you report
 ## Highlights
 - **Any verifiable task, one class.** Teacher calls, rejection sampling, SFT, evaluation and GRPO are
   shared; a task only supplies data, prompts, a verifier and a score.
+- **Any student model.** Any causal LM from the Hugging Face hub or a local path can be the student
+  (Qwen, Llama, Mistral, Gemma, Phi, GPT-2, ...), including base models without a chat template.
 - **Verified data, measured value.** Teacher outputs are kept only if they pass your verifier (failed
   examples are retried), and a no-teacher control (`labels`) shows what the teacher actually adds.
 - **RL that tells you when it will not work.** Before GRPO, the share of prompts that carry a learning
@@ -82,12 +84,13 @@ pip install "vllm==0.11.0"             # only for GRPO and the pass-rate filter 
 python -m distillops doctor            # GPU, chosen precision, free memory and disk, library versions
 python -m pytest -q                    # unit tests; no GPU or network needed
 ```
-Python 3.11-3.12. Tested on two setups:
+Python 3.11-3.12. Tested on these setups:
 
 | Machine | Used for | torch | transformers | TRL | PEFT | vLLM |
 |---|---|---|---|---|---|---|
 | Windows 11, RTX 4090 24GB | teacher calls, SFT, evaluation, SASRec | 2.11 (cu128) | 5.21 | 1.16 | 0.21 | - |
 | Ubuntu 22.04, RTX 6000D 84GB | GRPO, pass-rate filter, SFT, evaluation | 2.8 (cu128) | 4.57.1 | 0.24 | 0.21 | 0.11.0 |
+| macOS (Apple Silicon), CPU only | SFT, evaluation and GRPO without vLLM on non-Qwen students (gpt2, SmolLM2-135M-Instruct) | 2.15 | 4.57.1 | 0.24 | 0.21 | - |
 
 vLLM 0.11 needs transformers 4.x; pin `transformers==4.57.1 trl==0.24.0` next to it. The framework
 handles the version differences it knows about (warmup arguments, chat-template options).
@@ -210,9 +213,9 @@ arguments, repeatable), `--split`, `--n` (random subset, 0 = all) and `--seed`.
 | `doctor` | environment report and platform warnings | - |
 | `teacher` | teacher outputs -> `verify` -> accepted SFT rows, with retries | `--teacher` (config, required), `--max-attempts` (3), `--out` |
 | `labels` | label-only SFT rows from `gold_sft_example` (the no-teacher control) | `--out` |
-| `sft` | supervised fine-tuning from a YAML config | `--train_file`, `--output_dir`, `--model`, `--epochs` (override the config) |
-| `eval` | generate with a student and score with `Task.score` | `--model`, `--max-new-tokens` (512), `--batch` (0 = auto), `--no-think`, `--tag`, `--out` |
-| `grpo` | GRPO with `Task.score` as the reward | `--filter-samples N`, `--filter-only`, `--filter-gpu-memory` (0.4), `--keep-ids`, `--exclude`, `--epochs`, `--max-steps`, `--eval-every`, `--eval-examples`, `--output_dir` |
+| `sft` | supervised fine-tuning from a YAML config | `--train_file`, `--output_dir`, `--model`, `--epochs`, `--chat-template` (override the config) |
+| `eval` | generate with a student and score with `Task.score` | `--model`, `--max-new-tokens` (512), `--batch` (0 = auto), `--no-think`, `--chat-template`, `--tag`, `--out` |
+| `grpo` | GRPO with `Task.score` as the reward | `--model`, `--filter-samples N`, `--filter-only`, `--filter-gpu-memory` (0.4), `--keep-ids`, `--exclude`, `--epochs`, `--max-steps`, `--eval-every`, `--eval-examples`, `--chat-template`, `--output_dir` |
 | `merge` | merge a LoRA adapter into its base model | `--base`, `--adapter`, `--out` |
 | `cost` | teacher spend from the local response cache | `--teacher` (required) |
 
@@ -238,6 +241,24 @@ something itself (micro-batch, precision, validation source), it prints what it 
 | `price` | 0 | `input_cache_hit`, `input_cache_miss`, `output` per 1M tokens, in any currency; only for the cost meter. Prompt-cache hits are read from either `prompt_cache_hit_tokens` or `prompt_tokens_details.cached_tokens` |
 | `cache_path` | `cache/teacher.sqlite` | response cache: identical requests are never paid twice |
 
+### Student model
+Any causal language model can be the student: set `model` in the SFT or GRPO config, or pass
+`--model`, to a hub id or a local path. The included configs name Qwen3 only because the example
+results used it.
+- **Chat template.** Prompts and training rows go through the student's chat template, the same one
+  in SFT, evaluation and GRPO. Instruct models bring their own. A model without one (a base model
+  such as `gpt2`) gets a plain `User:` / `Assistant:` template whose replies end with the EOS token,
+  so the model learns to stop; a notice says so. To choose another, set `chat_template` in the config
+  or pass `--chat-template`: `plain`, a Jinja file, or a Jinja string. The template is saved with the
+  trained model, so later commands use it without the option.
+- **Template options** (`--no-think`, `chat_template_kwargs`) are passed to the template; templates
+  that do not use them ignore them.
+- **Architectures.** Memory and disk estimates read layer, head and vocabulary sizes under each
+  family's own config names (Llama/Qwen, GPT-2, Falcon, ChatGLM, multimodal configs, ...). For a
+  model with no attention heads (e.g. a state-space model), generation starts at batch 8 and adapts.
+- **No CUDA GPU.** SFT, evaluation and GRPO with `use_vllm: false` run on the CPU (slow, but
+  fine for small models); GRPO with vLLM and the pass-rate filter need a Linux GPU.
+
 ### SFT (`configs/sft_qwen3.yaml`)
 | Field | Default | Meaning |
 |---|---|---|
@@ -249,6 +270,7 @@ something itself (micro-batch, precision, validation source), it prints what it 
 | `warmup_ratio` | 0.03 | cosine schedule |
 | `lora`, `lora_r`, `lora_alpha`, `lora_dropout` | true, 32, 64, 0.05 | LoRA on all linear layers; `lora: false` = full fine-tuning (fp32 master weights) |
 | `seed`, `logging_steps`, `save_strategy` | 42, 10, `epoch` | |
+| `chat_template` | none | none = the model's own (plain if it has none); `plain`, a Jinja file or string ([Student model](#student-model)) |
 | `extra` | `{}` | any other TRL `SFTConfig` argument; gradient checkpointing is on unless `extra: {gradient_checkpointing: false}` |
 
 With LoRA, a merged copy is saved to `output_dir/merged` for evaluation and serving.
@@ -256,7 +278,7 @@ With LoRA, a merged copy is saved to `output_dir/merged` for evaluation and serv
 ### GRPO (`configs/grpo_gsm8k_qwen3_0.6b.yaml`)
 | Field | Default | Meaning |
 |---|---|---|
-| `model`, `output_dir` | required | start checkpoint (the SFT model) and where to write |
+| `model`, `output_dir` | required | start checkpoint (the SFT model; `--model` overrides) and where to write |
 | `num_generations` | 8 | completions per prompt; the group is the baseline for the advantage |
 | `max_prompt_length`, `max_completion_length` | 768, 256 | token limits |
 | `temperature` | 1.0 | sampling temperature for rollouts |
@@ -267,6 +289,7 @@ With LoRA, a merged copy is saved to `output_dir/merged` for evaluation and serv
 | `max_steps` | 500 | or set by `--epochs` |
 | `use_vllm`, `vllm_mode`, `vllm_gpu_memory_utilization` | true, `colocate`, 0.3 | rollouts with vLLM on the training GPU |
 | `lora` | false | true = LoRA (low-precision base) |
+| `chat_template` | none | as for SFT; a model trained with distillops already carries its template |
 | `chat_template_kwargs` | `{}` | e.g. `{enable_thinking: false}`; prompts are rendered by the framework, so this works with any TRL version |
 | `eval_every` | 25 | validation check every N steps (0 = off) |
 | `eval_examples` | 200 | validation prompts: the task's `valid` split if it has one, else held out of training (at most 20%) |
@@ -297,6 +320,8 @@ With LoRA, a merged copy is saved to `output_dir/merged` for evaluation and serv
   pass-rate filter, validation-based checkpoint selection, entropy guard.
 - **Hardware-agnostic** (`distillops/precision.py`, `memory.py`, `preflight.py`): precision chosen from
   the GPU, batch sizes from free memory and the model's KV-cache size, disk checked before training.
+- **Model-agnostic** (`distillops/chat.py`, `memory.py`): any causal LM; a chat template for models
+  without one, and config sizes read under each architecture's field names.
 
 ## Safeguards
 Each one comes from a real failure; [docs/PITFALLS.md](docs/PITFALLS.md) has the details.
@@ -312,6 +337,7 @@ Each one comes from a real failure; [docs/PITFALLS.md](docs/PITFALLS.md) has the
 | GRPO on prompts that are always right or always wrong learns nothing | pass-rate filter with plain-language advice; `--epochs` sizes the run to the kept prompts |
 | GRPO entropy collapse: the policy memorises one answer per prompt | stop when entropy stays below 10% of the run's own starting value (relative, so no task-specific threshold) |
 | Training reward rises while held-out quality falls | validation-based checkpoint selection; `output_dir` keeps the best model, or the start model if nothing beats it |
+| Code that only fits one model family: gpt2 names its layer count `n_layer`, base models have no chat template, and without CUDA transformers trains on Apple's MPS, where gpt2's attention dropout fails | sizes read under each architecture's config names; a plain chat template saved with the model; CPU training when there is no CUDA GPU |
 
 ## Included examples and results
 The two example tasks exist to show the workflow and what it achieves; their code lives in `tasks/`
@@ -422,7 +448,7 @@ python scripts/rec_two_stage.py --summarise results/$C/two_stage
 ## Layout
 ```
 distillops/       the framework: teacher, task interface, rejection sampling, sft, evaluate, grpo,
-                  precision / memory / preflight, cli
+                  chat (templates), precision / memory / preflight, cli
 tasks/            the two included example tasks (not needed for your own):
   math/           GSM8K, also the reference implementation of a Task
   rec/            recommendation: data, SASRec baseline and distillation, prompts, title trie,

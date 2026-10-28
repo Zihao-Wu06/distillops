@@ -26,15 +26,17 @@ def evaluate_rec(
     enable_thinking: bool = True,
     beams: int = 20,
     batch_size: int = 0,
+    chat_template: str | None = None,
     **_: Any,  # generic options that do not apply here (e.g. max_new_tokens)
 ) -> dict[str, Any]:
     import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from transformers import AutoModelForCausalLM
 
-    tok = AutoTokenizer.from_pretrained(model)
+    from distillops.chat import device, load_tokenizer
     from distillops.precision import compute_dtype
 
-    lm = AutoModelForCausalLM.from_pretrained(model, dtype=compute_dtype(), device_map="cuda").eval()
+    tok = load_tokenizer(model, chat_template)
+    lm = AutoModelForCausalLM.from_pretrained(model, dtype=compute_dtype(), device_map=device()).eval()
     titles = load_catalog(task.category).unique_titles()
     check_boundary(tok, titles)
     trie = build_trie(titles, tok)

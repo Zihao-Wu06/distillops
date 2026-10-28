@@ -7,7 +7,8 @@ TRL then computes the loss on completion tokens only (prompt is masked).
 Key choices:
 - completion-only loss;
 - over-long rows are DROPPED, not truncated (truncation teaches "never finish");
-- the student's chat template is the one used at inference (same tokenizer);
+- the student's chat template is the one used at inference (same tokenizer); models without one
+  get a plain template (`chat_template`, see distillops/chat.py), saved with the trained model;
 - LoRA on all linear layers with lr ~1e-4, or full fine-tuning with lr ~1e-5.
 """
 
@@ -19,6 +20,8 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+
+from .chat import chat_ids
 
 
 @dataclass
@@ -40,6 +43,7 @@ class SFTRunConfig:
     seed: int = 42
     logging_steps: int = 10
     save_strategy: str = "epoch"
+    chat_template: str | None = None  # None = the model's own; "plain", a Jinja file or string (chat.py)
     extra: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -55,19 +59,23 @@ def _load_rows(path: str) -> list[dict]:
 
 
 def length_filter(rows: list[dict], tokenizer, max_length: int) -> tuple[list[dict], dict]:
-    """Drop rows whose prompt+completion exceed max_length tokens (never truncate)."""
-    kept, lengths = [], []
+    """Drop rows whose prompt+completion exceed max_length tokens (never truncate). Also counts rows
+    whose prompt tokens are not a prefix of prompt+completion tokens (the completion's first token
+    merged with the prompt's last one): there the loss mask is off by a token."""
+    kept, lengths, misaligned = [], [], 0
     for r in rows:
-        text = tokenizer.apply_chat_template(r["prompt"] + r["completion"], tokenize=False)
-        n = len(tokenizer(text, add_special_tokens=False)["input_ids"])
-        lengths.append(n)
-        if n <= max_length:
+        prompt_ids = chat_ids(tokenizer, r["prompt"], add_generation_prompt=True)
+        ids = chat_ids(tokenizer, r["prompt"] + r["completion"])
+        misaligned += ids[: len(prompt_ids)] != prompt_ids
+        lengths.append(len(ids))
+        if len(ids) <= max_length:
             kept.append({"prompt": r["prompt"], "completion": r["completion"]})
     lengths.sort()
     stats = {
         "rows_in": len(rows),
         "rows_kept": len(kept),
         "dropped_too_long": len(rows) - len(kept),
+        "prompt_boundary_mismatch": misaligned,
         "len_p50": lengths[len(lengths) // 2] if lengths else 0,
         "len_p99": lengths[int(len(lengths) * 0.99)] if lengths else 0,
         "len_max": lengths[-1] if lengths else 0,
@@ -95,12 +103,17 @@ def _warmup(ratio: float) -> dict:
 def train(cfg: SFTRunConfig) -> dict:
     import torch
     from datasets import Dataset
-    from transformers import AutoTokenizer
     from trl import SFTConfig, SFTTrainer
 
-    tok = AutoTokenizer.from_pretrained(cfg.model)
+    from .chat import load_tokenizer
+
+    tok = load_tokenizer(cfg.model, cfg.chat_template)
     rows, len_stats = length_filter(_load_rows(cfg.train_file), tok, cfg.max_length)
     print("length filter:", len_stats)
+    if len_stats["prompt_boundary_mismatch"]:
+        print(f"note: in {len_stats['prompt_boundary_mismatch']} rows the completion's first token merges with "
+              "the end of the prompt (often a completion starting with whitespace); the loss mask is off by one "
+              "token there. Strip leading whitespace from completions to avoid it.", flush=True)
     print(show_masked_example(tok, rows[0])[:2000])
     eval_ds = None
     if cfg.eval_file:
@@ -116,11 +129,11 @@ def train(cfg: SFTRunConfig) -> dict:
             target_modules="all-linear", task_type="CAUSAL_LM",
         )
 
-    defaults = {"gradient_checkpointing": True}
-    defaults.update(cfg.extra)  # config `extra` may override defaults such as gradient_checkpointing
     from .precision import describe, train_settings
 
     prec = train_settings(full_finetune=not cfg.lora)
+    defaults = {"gradient_checkpointing": True, "use_cpu": prec["use_cpu"]}
+    defaults.update(cfg.extra)  # config `extra` may override defaults such as gradient_checkpointing
     print("precision:", describe(), flush=True)
     args = SFTConfig(
         **defaults,

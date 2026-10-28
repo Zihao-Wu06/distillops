@@ -20,21 +20,54 @@ from typing import Any, Callable
 GROWTH = 2  # peak / final KV-cache size, from cache reallocation while generating
 
 
+# Config field names differ between architectures (Llama/Qwen: num_hidden_layers, GPT-2: n_layer,
+# ChatGLM: num_layers, ...); the first one present wins.
+_DIM_NAMES = {
+    "layers": ("num_hidden_layers", "n_layer", "num_layers", "n_layers"),
+    "heads": ("num_attention_heads", "n_head", "num_heads", "n_heads"),
+    "kv_heads": ("num_key_value_heads", "n_kv_heads", "num_kv_heads"),
+    "hidden": ("hidden_size", "n_embd", "d_model", "dim"),
+    "head_dim": ("head_dim", "kv_channels"),
+    "vocab": ("vocab_size", "padded_vocab_size"),
+}
+
+
+def model_dims(config: Any) -> dict[str, int]:
+    """Layers, attention heads, KV heads, hidden size, head size and vocabulary of a causal LM config,
+    whatever the architecture calls them. Raises ValueError if the essential ones are missing."""
+    get_text = getattr(config, "get_text_config", None)  # multimodal configs nest the LM config
+    cfg = get_text() if callable(get_text) else getattr(config, "text_config", config)
+
+    def first(key: str) -> int | None:
+        for name in _DIM_NAMES[key]:
+            value = getattr(cfg, name, None)
+            if isinstance(value, int) and value > 0:
+                return value
+        return None
+
+    layers, heads, hidden = first("layers"), first("heads"), first("hidden")
+    if not (layers and heads and hidden):
+        raise ValueError(f"cannot read layers / heads / hidden size from {type(cfg).__name__}")
+    if getattr(cfg, "multi_query", False) and not getattr(cfg, "new_decoder_architecture", False):
+        kv_heads = 1  # multi-query attention (GPT-BigCode, Falcon-7B); Falcon-40B style lists its KV heads
+    elif getattr(cfg, "multi_query_attention", False):
+        kv_heads = getattr(cfg, "multi_query_group_num", 1)  # ChatGLM
+    else:
+        kv_heads = first("kv_heads") or heads
+    return {"layers": layers, "heads": heads, "kv_heads": kv_heads, "hidden": hidden,
+            "head_dim": first("head_dim") or hidden // heads, "vocab": first("vocab") or 50_000}
+
+
 def kv_bytes_per_token(config: Any, bytes_per_value: int = 2) -> int:
-    cfg = getattr(config, "text_config", config)  # multimodal configs nest the LM config
-    layers = cfg.num_hidden_layers
-    heads = cfg.num_attention_heads
-    kv_heads = getattr(cfg, "num_key_value_heads", None) or heads
-    head_dim = getattr(cfg, "head_dim", None) or cfg.hidden_size // heads
-    return 2 * layers * kv_heads * head_dim * bytes_per_value
+    d = model_dims(config)
+    return 2 * d["layers"] * d["kv_heads"] * d["head_dim"] * bytes_per_value
 
 
 def bytes_per_sequence(config: Any, seq_len: int, beam: bool = False, bytes_per_value: int = 2) -> int:
     """Peak bytes for one generated sequence: KV cache (x GROWTH) plus per-step
     logits / mask buffers over the vocabulary. Beam search also copies the cache when it
     reorders beams, hence another x2 (measured: ~2x for greedy, ~3.7x for beams)."""
-    cfg = getattr(config, "text_config", config)
-    per = kv_bytes_per_token(config, bytes_per_value) * seq_len * GROWTH + cfg.vocab_size * 16
+    per = kv_bytes_per_token(config, bytes_per_value) * seq_len * GROWTH + model_dims(config)["vocab"] * 16
     return per * (2 if beam else 1)
 
 
@@ -58,8 +91,12 @@ def max_sequences(
         # reusable too; the driver reports it as taken.
         free_bytes += torch.cuda.memory_reserved() - torch.cuda.memory_allocated()
     itemsize = getattr(getattr(model, "dtype", None), "itemsize", 2)  # the KV cache uses the model's dtype
-    n = int(free_bytes * fraction) // bytes_per_sequence(model.config, seq_len, beam, itemsize)
-    return max(1, min(cap, n))
+    try:
+        per = bytes_per_sequence(model.config, seq_len, beam, itemsize)
+    except ValueError as e:  # e.g. a model without attention heads: start small, adaptive_chunks adjusts
+        print(f"note: {e}; starting generation with batch {min(cap, 8)}", flush=True)
+        return min(cap, 8)
+    return max(1, min(cap, int(free_bytes * fraction) // per))
 
 
 def _is_oom(e: BaseException) -> bool:

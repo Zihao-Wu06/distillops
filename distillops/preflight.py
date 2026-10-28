@@ -24,11 +24,13 @@ def model_bytes(model: str, bytes_per_param: int = 2) -> int:
     try:
         from transformers import AutoConfig
 
-        c = AutoConfig.from_pretrained(model)
-        c = getattr(c, "text_config", c)
-        layer = 12 * c.hidden_size**2  # attention + MLP, a standard rough count
-        return int((c.num_hidden_layers * layer + 2 * c.vocab_size * c.hidden_size) * bytes_per_param)
-    except Exception:
+        from .memory import model_dims
+
+        d = model_dims(AutoConfig.from_pretrained(model))
+        layer = 12 * d["hidden"] ** 2  # attention + MLP, a standard rough count
+        return int((d["layers"] * layer + 2 * d["vocab"] * d["hidden"]) * bytes_per_param)
+    except Exception as e:  # unknown architecture or no network: disk checks are skipped
+        print(f"note: could not estimate the size of {model} ({e}); disk-space checks are skipped", flush=True)
         return 0
 
 
