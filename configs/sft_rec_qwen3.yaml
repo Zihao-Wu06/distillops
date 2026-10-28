@@ -1,0 +1,13 @@
+# LoRA SFT for the recommendation student: purchase history -> next item's title.
+# Choose the model size with --model (Qwen/Qwen3-0.6B, Qwen/Qwen3-1.7B, ...).
+model: Qwen/Qwen3-1.7B
+train_file: data/sft/Industrial_and_Scientific/noreason_matched.jsonl
+output_dir: checkpoints/rec_qwen3_1.7b
+max_length: 1024
+epochs: 2
+lr: 1.0e-4          # LoRA learning rate (full fine-tuning would use ~1e-5)
+batch_size: 8
+grad_accum: 4       # effective batch 32
+lora: true
+lora_r: 32
+lora_alpha: 64

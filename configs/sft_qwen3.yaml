@@ -1,0 +1,14 @@
+# Generic LoRA SFT config for a Qwen3 student (any task). Override --train_file, --output_dir, --model.
+model: Qwen/Qwen3-0.6B
+train_file: results/gsm8k/teacher_train_n0/accepted.jsonl
+output_dir: checkpoints/qwen3_0.6b_sft
+max_length: 1024
+epochs: 2
+lr: 1.0e-4          # LoRA learning rate (full fine-tuning would use ~1e-5)
+batch_size: 8
+grad_accum: 4       # effective batch 32
+extra:
+  gradient_checkpointing: true    # memory-safe default; false is ~35% faster if memory allows (same results)
+lora: true
+lora_r: 32
+lora_alpha: 64

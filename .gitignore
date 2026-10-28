@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+data/
+results/
+cache/
+.env
+*.egg-info/
+.DS_Store
+models/
+checkpoints/
+logs/
+# maintainer-only notes and machine scripts, never published
+_local/
