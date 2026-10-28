@@ -1,10 +1,11 @@
-from datetime import datetime, timezone
 from types import SimpleNamespace
+
+import pytest
 
 from distillops.io import read_jsonl
 from distillops.rejection import rejection_sample
 from distillops.task import Task, Verdict
-from distillops.teacher import Price, Teacher, TeacherConfig, is_peak
+from distillops.teacher import Price, Teacher, TeacherConfig, cached_prompt_tokens
 
 
 class FakeClient:
@@ -81,17 +82,12 @@ async def test_teacher_disk_cache_and_cost(tmp_path):
     c = await teacher.complete([{"role": "user", "content": "hi"}], sample_id=1)
     assert not a.cached and b.cached and not c.cached  # different sample_id -> new request
     assert teacher.client.calls == 2
-    # off-peak cost: 800 hit*0.02 + 200 miss*1 + 100 out*4 per 1M tokens
+    # cost: 800 hit*0.02 + 200 miss*1 + 100 out*4 per 1M tokens, the same at any time of day
     expected = (800 * 0.02 + 200 * 1.0 + 100 * 4.0) / 1e6
-    assert abs(a.cost_cny - expected) < 1e-12 or abs(a.cost_cny - 2 * expected) < 1e-12
-    assert teacher.meter.summary()["served_from_local_cache"] == 1
-
-
-def test_peak_hours_beijing():
-    # 2026-10-28 is a Wednesday. 02:00 UTC = 10:00 Beijing (peak); 05:00 UTC = 13:00 (off-peak).
-    assert is_peak(datetime(2026, 10, 28, 2, 0, tzinfo=timezone.utc))
-    assert not is_peak(datetime(2026, 10, 28, 5, 0, tzinfo=timezone.utc))
-    assert not is_peak(datetime(2026, 10, 31, 2, 0, tzinfo=timezone.utc))  # Saturday
+    assert abs(a.cost - expected) < 1e-12 and b.cost == 0.0  # the local cache is free
+    summary = teacher.meter.summary()  # rounded for display; the meter keeps the exact sum
+    assert summary["served_from_local_cache"] == 1 and abs(teacher.meter.cost - 2 * expected) < 1e-12
+    assert summary["cost"] == round(2 * expected, 4)
 
 
 async def test_stop_when_leaves_unfinished_examples_for_a_later_run(tmp_path):
@@ -99,7 +95,7 @@ async def test_stop_when_leaves_unfinished_examples_for_a_later_run(tmp_path):
     teacher.cfg.max_concurrency = 1  # examples run one at a time, so the stop point is deterministic
     calls = {"n": 0}
 
-    def stop_after_two():  # e.g. "peak pricing has started"
+    def stop_after_two():  # e.g. a budget or deadline was reached
         calls["n"] += 1
         return calls["n"] > 2
 
@@ -109,18 +105,27 @@ async def test_stop_when_leaves_unfinished_examples_for_a_later_run(tmp_path):
     assert stats["examples"] == 4 and stats["not_run_stopped"] == 0
 
 
-def test_peak_hours_come_from_the_teacher_config():
-    from distillops.teacher import PeakHours
-
-    weekday_morning_beijing = datetime(2026, 10, 28, 2, 0, tzinfo=timezone.utc)  # 10:00 in Beijing
-    plain = TeacherConfig(base_url="x", model="m")  # a provider without peak pricing
-    assert not plain.in_peak(weekday_morning_beijing)
-    deepseek = TeacherConfig(base_url="x", model="m", peak=PeakHours([[9, 12], [14, 18]], 8.0, True))
-    assert deepseek.in_peak(weekday_morning_beijing)
-    other = TeacherConfig(base_url="x", model="m", peak=PeakHours([[0, 24]], -5.0, False))
-    assert other.in_peak(datetime(2026, 10, 31, 2, 0, tzinfo=timezone.utc))  # every day, all day
+def test_cached_prompt_tokens_for_different_providers():
+    assert cached_prompt_tokens(SimpleNamespace(prompt_cache_hit_tokens=800)) == 800  # DeepSeek style
+    assert cached_prompt_tokens(SimpleNamespace(prompt_tokens_details=SimpleNamespace(cached_tokens=300))) == 300  # OpenAI
+    assert cached_prompt_tokens(SimpleNamespace(prompt_tokens_details={"cached_tokens": 5})) == 5
+    assert cached_prompt_tokens(SimpleNamespace(prompt_tokens=10)) == 0  # provider without prompt caching
+    assert cached_prompt_tokens(SimpleNamespace(prompt_tokens_details=None)) == 0
 
 
-def test_shipped_deepseek_config_declares_its_peak_hours():
-    cfg = TeacherConfig.from_yaml("configs/teacher_deepseek_flash.yaml")
-    assert cfg.peak.windows == [[9, 12], [14, 18]] and cfg.peak.utc_offset_hours == 8
+@pytest.mark.parametrize("path", ["configs/teacher_template.yaml", "configs/teacher_deepseek.yaml"])
+def test_shipped_teacher_configs_load(path):
+    cfg = TeacherConfig.from_yaml(path)
+    assert cfg.base_url.startswith("https://") and cfg.model and cfg.api_key_env and cfg.cache_path
+
+
+def test_teacher_config_defaults_are_provider_neutral():
+    cfg = TeacherConfig(base_url="http://localhost:8000/v1", model="m")
+    assert cfg.api_key_env == "TEACHER_API_KEY" and cfg.price == Price()
+
+
+def test_teacher_command_requires_a_teacher_config():
+    from distillops.cli import main
+
+    with pytest.raises(SystemExit):  # argparse: --teacher is required
+        main(["teacher", "--task", "tasks.math.gsm8k:GSM8KTask"])

@@ -92,19 +92,22 @@ Python 3.11-3.12. Tested on two setups:
 vLLM 0.11 needs transformers 4.x; pin `transformers==4.57.1 trl==0.24.0` next to it. The framework
 handles the version differences it knows about (warmup arguments, chat-template options).
 
-**Teacher terms of use:** check that your teacher's terms allow training other models on its outputs.
-DeepSeek's do; some providers' terms forbid training competing models.
+**Teacher terms of use:** check that your teacher's terms allow training other models on its outputs;
+some providers' terms forbid training competing models.
 
 ## Quick start
 The whole workflow on the included GSM8K example. For your own task, set `T` to its import path; the
-commands stay the same.
+commands stay the same. The teacher can be any OpenAI-compatible API: copy
+`configs/teacher_template.yaml`, set `base_url`, `model`, `api_key_env` and `price`, and export the key.
 ```bash
-export DEEPSEEK_API_KEY=...
+cp configs/teacher_template.yaml configs/my_teacher.yaml       # then edit it for your provider
+export TEACHER_API_KEY=...                                      # the variable named by api_key_env
 T=tasks.math.gsm8k:GSM8KTask
+TEACHER=configs/my_teacher.yaml
 
 python -m distillops eval    --task $T --model Qwen/Qwen3-0.6B --no-think           # baseline: 62.4%
-python -m distillops teacher --task $T --n 100                                     # smoke test (~0.05 CNY)
-python -m distillops teacher --task $T                                             # full train split (3.76 CNY)
+python -m distillops teacher --task $T --teacher $TEACHER --n 100                   # smoke test on 100 problems
+python -m distillops teacher --task $T --teacher $TEACHER                           # full train split
 python -m distillops labels  --task $T                                             # control: answers only
 python -m distillops sft     configs/sft_qwen3.yaml \
          --train_file results/gsm8k/teacher_train_n0/accepted.jsonl --output_dir checkpoints/gsm8k_0.6b_teacher
@@ -115,8 +118,10 @@ python -m distillops grpo configs/grpo_gsm8k_qwen3_0.6b.yaml --task $T --filter-
 python -m distillops grpo configs/grpo_gsm8k_qwen3_0.6b.yaml --task $T \
          --keep-ids checkpoints/gsm8k_0.6b_grpo/pass_rate_kept.txt --epochs 1
 python -m distillops eval    --task $T --model checkpoints/gsm8k_0.6b_grpo           # 66.8%
-python -m distillops cost                                                          # teacher spend so far
+python -m distillops cost    --teacher $TEACHER                                     # teacher spend so far
 ```
+The included results used DeepSeek as the teacher (`configs/teacher_deepseek.yaml`); the full GSM8K
+teacher run cost 3.76 CNY.
 
 ## Add your own task
 A complete task: support tickets classified into a fixed label set, with the teacher explaining its
@@ -169,7 +174,8 @@ class TicketTriage(Task):
 
 ```bash
 python scripts/check_task.py --task my_tasks.triage:TicketTriage      # data, prompts, masked SFT row: check before paying
-python -m distillops teacher --task my_tasks.triage:TicketTriage --n 50 # then labels / sft / eval / grpo as in Quick start
+python -m distillops teacher --task my_tasks.triage:TicketTriage --teacher configs/my_teacher.yaml --n 50
+# then labels / sft / eval / grpo as in Quick start
 ```
 
 The methods, with the included GSM8K example for comparison:
@@ -202,13 +208,13 @@ arguments, repeatable), `--split`, `--n` (random subset, 0 = all) and `--seed`.
 | Command | What it does | Main flags |
 |---|---|---|
 | `doctor` | environment report and platform warnings | - |
-| `teacher` | teacher outputs -> `verify` -> accepted SFT rows, with retries | `--teacher` (config), `--max-attempts` (3), `--out`, `--allow-peak` |
+| `teacher` | teacher outputs -> `verify` -> accepted SFT rows, with retries | `--teacher` (config, required), `--max-attempts` (3), `--out` |
 | `labels` | label-only SFT rows from `gold_sft_example` (the no-teacher control) | `--out` |
 | `sft` | supervised fine-tuning from a YAML config | `--train_file`, `--output_dir`, `--model`, `--epochs` (override the config) |
 | `eval` | generate with a student and score with `Task.score` | `--model`, `--max-new-tokens` (512), `--batch` (0 = auto), `--no-think`, `--tag`, `--out` |
 | `grpo` | GRPO with `Task.score` as the reward | `--filter-samples N`, `--filter-only`, `--filter-gpu-memory` (0.4), `--keep-ids`, `--exclude`, `--epochs`, `--max-steps`, `--eval-every`, `--eval-examples`, `--output_dir` |
 | `merge` | merge a LoRA adapter into its base model | `--base`, `--adapter`, `--out` |
-| `cost` | teacher spend from the local response cache | `--teacher` |
+| `cost` | teacher spend from the local response cache | `--teacher` (required) |
 
 `grpo` details: `--filter-samples 8 --filter-only` samples 8 completions per prompt with vLLM, prints
 how many prompts give a learning signal, and writes `pass_rate_kept.txt`; `--keep-ids` then trains on
@@ -219,18 +225,17 @@ those prompts in a fresh process. `--exclude <jsonl>` skips prompts whose `meta.
 Every option has a default and can be changed in the YAML file. Whenever the framework chooses
 something itself (micro-batch, precision, validation source), it prints what it chose and why.
 
-### Teacher (`configs/teacher_deepseek_flash.yaml`)
+### Teacher (`configs/teacher_template.yaml`; `configs/teacher_deepseek.yaml` is a filled-in example)
 | Field | Default | Meaning |
 |---|---|---|
-| `base_url`, `model` | required | any OpenAI-compatible endpoint and model name |
-| `api_key_env` | `DEEPSEEK_API_KEY` | environment variable holding the key (keys never go in config files) |
-| `temperature` | 1.0 | > 0 so retries in rejection sampling give different answers (shipped config: 0.7) |
-| `max_tokens` | 1024 | per call (shipped: 600) |
-| `max_concurrency` | 32 | parallel requests (shipped: 256; price is per token, so more only finishes sooner) |
+| `base_url`, `model` | required | any OpenAI-compatible endpoint (hosted API, vLLM, SGLang, ...) and model name |
+| `api_key_env` | `TEACHER_API_KEY` | environment variable holding the key (keys never go in config files) |
+| `temperature` | 1.0 | > 0 so retries in rejection sampling give different answers |
+| `max_tokens` | 1024 | per call |
+| `max_concurrency` | 32 | parallel requests; raise it if your provider allows |
 | `timeout_s`, `max_retries` | 300, 6 | per request; retries back off exponentially (not on 400/401/403/404) |
-| `extra_body` | `{}` | provider-specific options, e.g. `thinking: {type: disabled}` for DeepSeek |
-| `price` | 0 | `input_cache_hit`, `input_cache_miss`, `output` per 1M tokens, `peak_multiplier` |
-| `peak` | none | `windows` (`[[start, end], ...]` hours), `utc_offset_hours`, `weekdays_only`; `teacher` refuses to start and stops cleanly inside these hours unless `--allow-peak` |
+| `extra_body` | `{}` | provider-specific request options, passed through unchanged |
+| `price` | 0 | `input_cache_hit`, `input_cache_miss`, `output` per 1M tokens, in any currency; only for the cost meter. Prompt-cache hits are read from either `prompt_cache_hit_tokens` or `prompt_tokens_details.cached_tokens` |
 | `cache_path` | `cache/teacher.sqlite` | response cache: identical requests are never paid twice |
 
 ### SFT (`configs/sft_qwen3.yaml`)
@@ -282,8 +287,7 @@ With LoRA, a merged copy is saved to `output_dir/merged` for evaluation and serv
 
 ## What the framework handles
 - **Teacher client** (`distillops/teacher.py`): any OpenAI-compatible API; configurable concurrency,
-  retries with backoff, an on-disk response cache (re-runs are free), a cost meter, and optional
-  peak-price hours (refuses to start, and stops cleanly, inside them).
+  retries with backoff, an on-disk response cache (re-runs are free) and a cost meter.
 - **Adaptive rejection sampling** (`distillops/rejection.py`): retry only failed examples, up to
   `--max-attempts`; append-only logs so a killed run resumes where it stopped.
 - **SFT** (`distillops/sft.py`): TRL, completion-only loss, over-long rows dropped (never truncated),

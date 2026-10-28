@@ -25,7 +25,7 @@ from .teacher import Teacher
 
 
 class _Stopped(Exception):
-    """Raised when `stop_when()` turns true (e.g. peak pricing began)."""
+    """Raised when `stop_when()` turns true (e.g. a budget or deadline was reached)."""
 
 
 async def _one(

@@ -1,0 +1,16 @@
+# Teacher config template: copy it, fill in your provider, and pass it with --teacher.
+# Any endpoint that speaks the OpenAI chat-completions API works (hosted APIs, vLLM, SGLang, ...).
+base_url: https://api.example.com/v1     # the provider's OpenAI-compatible base URL
+model: your-teacher-model                # the provider's model name
+api_key_env: TEACHER_API_KEY             # environment variable that holds the API key (never put keys here)
+temperature: 0.7                         # > 0 so retries in rejection sampling give different answers
+max_tokens: 1024                         # per call
+max_concurrency: 32                      # parallel requests; raise it if the provider allows
+timeout_s: 300                           # per request
+max_retries: 6                           # with exponential backoff; 400/401/403/404 are not retried
+extra_body: {}                           # provider-specific request options, passed through unchanged
+price:                                   # per 1M tokens, in any currency; used only for the cost meter
+  input_cache_hit: 0.0                   # prompt tokens served from the provider's prompt cache
+  input_cache_miss: 0.0
+  output: 0.0
+cache_path: cache/teacher.sqlite         # local response cache: identical requests are never paid twice

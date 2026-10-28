@@ -1,11 +1,11 @@
-"""Black-box teacher client (any OpenAI-compatible endpoint, e.g. DeepSeek).
+"""Black-box teacher client for any OpenAI-compatible chat-completions endpoint.
 
 Features that matter for a distillation run:
 - disk cache: re-running a pipeline never pays twice for the same request;
 - `sample_id`: distinct cache keys for repeated samples of one prompt
   (needed by rejection sampling, where we retry the same question);
 - bounded concurrency + exponential-backoff retries;
-- a cost meter in CNY that knows DeepSeek's peak / off-peak pricing.
+- a cost meter in the currency of the configured prices.
 """
 
 from __future__ import annotations
@@ -17,7 +17,6 @@ import os
 import random
 import sqlite3
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -26,29 +25,19 @@ import yaml
 
 @dataclass
 class Price:
-    """CNY per 1M tokens at OFF-PEAK rates; peak = off-peak * peak_multiplier."""
+    """Price per 1M tokens, in any currency (the cost meter reports in the same one).
+    `input_cache_hit` applies to prompt tokens the provider served from its prompt cache."""
 
     input_cache_hit: float = 0.0
     input_cache_miss: float = 0.0
     output: float = 0.0
-    peak_multiplier: float = 2.0
-
-
-@dataclass
-class PeakHours:
-    """Hours when the provider charges more (e.g. DeepSeek: weekdays 09-12 and 14-18, Beijing time).
-    Empty `windows` means no peak pricing: the teacher runs at any time."""
-
-    windows: list[list[int]] = field(default_factory=list)  # [[start_hour, end_hour], ...] local time
-    utc_offset_hours: float = 0.0
-    weekdays_only: bool = True
 
 
 @dataclass
 class TeacherConfig:
     base_url: str
     model: str
-    api_key_env: str = "DEEPSEEK_API_KEY"
+    api_key_env: str = "TEACHER_API_KEY"  # name of the environment variable holding the key
     temperature: float = 1.0
     max_tokens: int = 1024
     max_concurrency: int = 32
@@ -56,31 +45,27 @@ class TeacherConfig:
     max_retries: int = 6
     extra_body: dict[str, Any] = field(default_factory=dict)
     price: Price = field(default_factory=Price)
-    peak: PeakHours = field(default_factory=PeakHours)
     cache_path: str = "cache/teacher.sqlite"
-
-    def in_peak(self, now: datetime | None = None) -> bool:
-        """True during this provider's peak-price hours (never, if none are configured)."""
-        return bool(self.peak.windows) and is_peak(now, self.peak)
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "TeacherConfig":
         raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
-        raw["price"] = Price(**raw.get("price", {}))
-        raw["peak"] = PeakHours(**raw.get("peak", {}))
+        raw["price"] = Price(**(raw.get("price") or {}))
         return cls(**raw)
 
 
-# Default used when no PeakHours is given: DeepSeek (Beijing time, Mon-Fri, 09-12 and 14-18).
-DEEPSEEK_PEAK = PeakHours(windows=[[9, 12], [14, 18]], utc_offset_hours=8.0, weekdays_only=True)
-
-
-def is_peak(now: datetime | None = None, peak: PeakHours | None = None) -> bool:
-    peak = peak or DEEPSEEK_PEAK
-    now = (now or datetime.now(timezone.utc)).astimezone(timezone(timedelta(hours=peak.utc_offset_hours)))
-    if peak.weekdays_only and now.weekday() >= 5:
-        return False
-    return any(start <= now.hour < end for start, end in peak.windows)
+def cached_prompt_tokens(usage: Any) -> int:
+    """Prompt tokens the provider served from its prompt cache. Providers report this
+    differently: DeepSeek as `prompt_cache_hit_tokens`, OpenAI-style APIs as
+    `prompt_tokens_details.cached_tokens`; 0 when neither is present."""
+    direct = getattr(usage, "prompt_cache_hit_tokens", None)
+    if direct:
+        return int(direct)
+    details = getattr(usage, "prompt_tokens_details", None)
+    if details is None:
+        return 0
+    cached = details.get("cached_tokens") if isinstance(details, dict) else getattr(details, "cached_tokens", None)
+    return int(cached or 0)
 
 
 @dataclass
@@ -91,7 +76,7 @@ class Completion:
     completion_tokens: int
     cache_hit_tokens: int
     cached: bool  # served from our local disk cache (cost 0)
-    cost_cny: float
+    cost: float  # in the currency of the configured prices
 
 
 class CostMeter:
@@ -101,7 +86,7 @@ class CostMeter:
         self.prompt_tokens = 0
         self.cache_hit_tokens = 0
         self.completion_tokens = 0
-        self.cost_cny = 0.0
+        self.cost = 0.0
 
     def add(self, c: Completion) -> None:
         self.calls += 1
@@ -111,7 +96,7 @@ class CostMeter:
         self.prompt_tokens += c.prompt_tokens
         self.cache_hit_tokens += c.cache_hit_tokens
         self.completion_tokens += c.completion_tokens
-        self.cost_cny += c.cost_cny
+        self.cost += c.cost
 
     def summary(self) -> dict[str, Any]:
         paid = self.calls - self.cache_served
@@ -123,7 +108,7 @@ class CostMeter:
             "api_cache_hit_tokens": self.cache_hit_tokens,
             "completion_tokens": self.completion_tokens,
             "avg_completion_tokens": round(self.completion_tokens / paid, 1) if paid else 0,
-            "cost_cny": round(self.cost_cny, 4),
+            "cost": round(self.cost, 4),
         }
 
 
@@ -143,11 +128,10 @@ class _DiskCache:
         self.db.commit()
 
 
-def _cost(cfg: TeacherConfig, prompt: int, hit: int, completion: int, peak: bool) -> float:
+def _cost(cfg: TeacherConfig, prompt: int, hit: int, completion: int) -> float:
     p = cfg.price
-    mult = p.peak_multiplier if peak else 1.0
     miss = max(prompt - hit, 0)
-    return mult * (hit * p.input_cache_hit + miss * p.input_cache_miss + completion * p.output) / 1e6
+    return (hit * p.input_cache_hit + miss * p.input_cache_miss + completion * p.output) / 1e6
 
 
 class Teacher:
@@ -183,7 +167,7 @@ class Teacher:
 
         hit = self._cache.get(key)
         if hit is not None:
-            c = Completion(**{**hit, "cached": True, "cost_cny": 0.0})
+            c = Completion(**{**hit, "cached": True, "cost": 0.0})
             self.meter.add(c)
             return c
 
@@ -194,7 +178,7 @@ class Teacher:
         usage = resp.usage
         prompt = int(getattr(usage, "prompt_tokens", 0) or 0)
         completion = int(getattr(usage, "completion_tokens", 0) or 0)
-        hit_tokens = int(getattr(usage, "prompt_cache_hit_tokens", 0) or 0)  # DeepSeek-specific field
+        hit_tokens = cached_prompt_tokens(usage)
         c = Completion(
             text=msg.content or "",
             reasoning=getattr(msg, "reasoning_content", None),
@@ -202,9 +186,9 @@ class Teacher:
             completion_tokens=completion,
             cache_hit_tokens=hit_tokens,
             cached=False,
-            cost_cny=_cost(self.cfg, prompt, hit_tokens, completion, self.cfg.in_peak()),
+            cost=_cost(self.cfg, prompt, hit_tokens, completion),
         )
-        record = {k: v for k, v in c.__dict__.items() if k not in ("cached", "cost_cny")}
+        record = {k: v for k, v in c.__dict__.items() if k not in ("cached", "cost")}
         self._cache.put(key, record)
         self.meter.add(c)
         return c

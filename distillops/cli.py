@@ -1,12 +1,12 @@
 """One command line for every task.
 
-    python -m distillops teacher --task tasks.math.gsm8k:GSM8KTask --n 100          # rejection-sampled teacher data
+    python -m distillops teacher --task tasks.math.gsm8k:GSM8KTask --teacher <teacher.yaml> --n 100
     python -m distillops labels  --task tasks.math.gsm8k:GSM8KTask                  # label-only control data
-    python -m distillops sft     configs/sft_qwen3_0.6b.yaml --train_file <accepted.jsonl>
+    python -m distillops sft     configs/sft_qwen3.yaml --train_file <accepted.jsonl>
     python -m distillops eval    --task tasks.math.gsm8k:GSM8KTask --model <ckpt> --n 500
-    python -m distillops grpo    configs/grpo.yaml --task tasks.math.gsm8k:GSM8KTask --filter-samples 8
+    python -m distillops grpo    configs/grpo_gsm8k_qwen3_0.6b.yaml --task tasks.math.gsm8k:GSM8KTask --filter-samples 8
     python -m distillops merge   --base Qwen/Qwen3-1.7B --adapter <lora_dir> --out <merged_dir>
-    python -m distillops cost                                                         # teacher spend so far
+    python -m distillops cost    --teacher <teacher.yaml>                           # teacher spend so far
     python -m distillops doctor                                                       # check this machine first
 
 `--task` is `module:Class` or a YAML file with `task:` and `args:`. Constructor
@@ -19,13 +19,11 @@ import argparse
 import asyncio
 import importlib
 import random
-import sys
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-DEFAULT_TEACHER = "configs/teacher_deepseek_flash.yaml"
 
 
 def load_task(spec: str, task_args: list[str] | None = None) -> Any:
@@ -59,15 +57,11 @@ def cmd_teacher(a: argparse.Namespace) -> None:
     from .teacher import Teacher, TeacherConfig
 
     tcfg = TeacherConfig.from_yaml(a.teacher)
-    if tcfg.in_peak() and not a.allow_peak:
-        sys.exit(f"Teacher API peak hours now ({tcfg.price.peak_multiplier}x price, see `peak` in {a.teacher}). "
-                 "Run off-peak, or pass --allow-peak.")
     task = load_task(a.task, a.task_arg)
     examples = subsample(task.load_examples(a.split), a.n, a.seed)
     out = Path(a.out or f"results/{task.name}/teacher_{a.split}_n{a.n}")
     teacher = Teacher(tcfg)
-    stop = None if a.allow_peak else tcfg.in_peak  # stop cleanly when peak starts; rerun the same command to resume
-    stats = asyncio.run(rejection_sample(task, teacher, examples, out, a.max_attempts, stop_when=stop))
+    stats = asyncio.run(rejection_sample(task, teacher, examples, out, a.max_attempts))
     print(stats)
     print(f"SFT data: {out / 'accepted.jsonl'}")
 
@@ -197,7 +191,8 @@ def cmd_cost(a: argparse.Namespace) -> None:
         n, prompt, hit, out = n + 1, prompt + r["prompt_tokens"], hit + r["cache_hit_tokens"], out + r["completion_tokens"]
     p = cfg.price
     cost = ((prompt - hit) * p.input_cache_miss + hit * p.input_cache_hit + out * p.output) / 1e6
-    print(f"calls {n:,} | input {prompt:,} (cache hit {hit:,}) | output {out:,} | off-peak cost {cost:.2f}")
+    print(f"calls {n:,} | input {prompt:,} (cache hit {hit:,}) | output {out:,} | cost {cost:,.4f} "
+          f"(in the currency of `price` in {a.teacher})")
 
 
 def cmd_doctor(a: argparse.Namespace) -> None:
@@ -213,10 +208,9 @@ def main(argv: list[str] | None = None) -> None:
 
     p = sub.add_parser("teacher", help="rejection-sample teacher outputs into SFT data")
     _task_args(p, "train")
-    p.add_argument("--teacher", default=DEFAULT_TEACHER)
+    p.add_argument("--teacher", required=True, help="teacher config YAML (see configs/teacher_template.yaml)")
     p.add_argument("--max-attempts", type=int, default=3)
     p.add_argument("--out")
-    p.add_argument("--allow-peak", action="store_true")
     p.set_defaults(fn=cmd_teacher)
 
     p = sub.add_parser("labels", help="label-only SFT data (no teacher), the control baseline")
@@ -268,7 +262,7 @@ def main(argv: list[str] | None = None) -> None:
     p.set_defaults(fn=cmd_doctor)
 
     p = sub.add_parser("cost", help="teacher spend from the local response cache")
-    p.add_argument("--teacher", default=DEFAULT_TEACHER)
+    p.add_argument("--teacher", required=True, help="teacher config YAML (its cache_path and price)")
     p.set_defaults(fn=cmd_cost)
 
     a = ap.parse_args(argv)
