@@ -1,8 +1,30 @@
-# distillops — black-box LLM distillation for any verifiable task
+# distillops — distil an API LLM into a small model, for any task with a checkable answer
 
-Distill an API-only teacher (no logits) into a small open model, for **any task whose answers
-can be checked**. You write one `Task` class; the framework does the rest:
+distillops turns a strong API model (the *teacher*) into a small open model you can run yourself,
+for **any task where a program can tell a good answer from a bad one**. You describe the task once,
+in a `Task` class; the same commands then collect verified teacher data, fine-tune, evaluate and run
+reinforcement learning. The framework never needs the teacher's logits, only its text answers.
 
+## What it can be used for
+The one requirement: given an input and an output, your code can say whether the output is right
+(`verify`, for teacher data) and how right it is on a 0-1 scale (`score`, for evaluation and RL).
+
+| Task type | What `verify` / `score` checks |
+|---|---|
+| Classification, routing, intent detection | the predicted label equals the gold label |
+| Structured extraction (JSON, forms, entities) | the output parses and its fields match |
+| Tool / function calling | the function name and arguments match the expected call |
+| Code generation | the code passes the task's unit tests |
+| Math and quantitative reasoning | the final number equals the answer |
+| Short-answer QA | the normalised answer matches |
+| Ranking, retrieval, recommendation | the right item appears in the output (e.g. in the top-k) |
+
+Two of these ship as worked examples, chosen to be very different: **math (GSM8K)** and
+**recommendation (Amazon)**. They show what the framework does and how well; nothing in the framework
+is specific to them. Any other task needs only its own `Task` class
+([Add your own task](#add-your-own-task) has a complete one in ~45 lines).
+
+## How it works
 ```
          ┌───────────────────────────────────────────────────────────────┐
  task ──►│ Task class: data, teacher prompt, verify, training row,       │  the only task-specific code
@@ -32,32 +54,26 @@ can be checked**. You write one `Task` class; the framework does the rest:
 `verify` decides which teacher outputs become training data; `score` is both the evaluation metric
 and the GRPO reward, so reinforcement learning optimises exactly what you report.
 
-Two tasks ship with it, deliberately different, to show the pipeline is task-agnostic:
-
-| Task | Answer | Verifier | What it tests |
-|---|---|---|---|
-| `tasks.math.gsm8k:GSM8KTask` | a number | exact numeric match | multi-step reasoning |
-| `tasks.rec.task:RecTask` | a product title (3,686-item catalog) | the item the user actually bought next | generative recommendation, catalog-constrained decoding |
-
 ## Highlights
-- **One workflow, two very different tasks.** The same commands distil, fine-tune, evaluate and RL-train
-  a math solver and a recommender; the framework code is shared and each task is one `Task` class
-  (GSM8K: ~150 lines).
-- **Teacher reasoning that beats human data.** On GSM8K, a 0.6B student trained on DeepSeek reasoning
-  scores **62.5%** vs **49.0%** when trained on the human-written solutions (answer-only training: 13.6%),
-  from 3.76 CNY of teacher calls; GRPO then lifts it to **66.8%**.
-- **LLM -> deployable model.** A fine-tuned Qwen3-1.7B recommender, distilled into two ~0.5M-parameter
-  SASRecs (recall + re-rank), reaches **HR@10 .164 / NDCG@10 .119** on the full test set, on par with
-  recent LLM recommenders (MiniOneRec 2025: .159/.117; S-GRec 2026: .163/.120) at ~1/1,500 of their
-  serving size.
-- **Silent failures caught and guarded**: low-precision weights that never move, entropy collapse,
-  overfitting during RL, VRAM spill on Windows, checkpoints filling the disk (see [Safeguards](#safeguards)).
+- **Any verifiable task, one class.** Teacher calls, rejection sampling, SFT, evaluation and GRPO are
+  shared; a task only supplies data, prompts, a verifier and a score.
+- **Verified data, measured value.** Teacher outputs are kept only if they pass your verifier (failed
+  examples are retried), and a no-teacher control (`labels`) shows what the teacher actually adds.
+- **RL that tells you when it will not work.** Before GRPO, the share of prompts that carry a learning
+  signal is measured and explained; during and after it, validation picks the best checkpoint, an
+  entropy guard stops collapse, and a weight-change check catches updates that never landed.
+- **Runs on the GPU you have.** Precision is chosen from the hardware, batch sizes from free memory and
+  the model's size, and disk space is checked before training; `doctor` reports all of it.
+- **Example results.** GSM8K: a 0.6B student goes from 62.4% to **66.8%** (teacher reasoning beats
+  human-written solutions by 13.5 points; 3.76 CNY of teacher calls). Recommendation: a fine-tuned 1.7B
+  model distilled into two ~0.5M-parameter SASRecs reaches **HR@10 .164 / NDCG@10 .119**, on par with
+  recent LLM recommenders at ~1/1,500 of their serving size.
 
 ## Contents
-[Install](#install) · [Quick start](#quick-start) · [Commands](#commands) · [Configuration](#configuration) ·
-[Outputs](#outputs) · [Add your own task](#add-your-own-task) · [What the framework handles](#what-the-framework-handles) ·
-[Safeguards](#safeguards) · [Results](#results) · [Reproduce](#reproduce-the-recommendation-results) ·
-[Related work](#related-work) · [Layout](#layout)
+[Install](#install) · [Quick start](#quick-start) · [Add your own task](#add-your-own-task) ·
+[Commands](#commands) · [Configuration](#configuration) · [Outputs](#outputs) ·
+[What the framework handles](#what-the-framework-handles) · [Safeguards](#safeguards) ·
+[Included examples and results](#included-examples-and-results) · [Related work](#related-work) · [Layout](#layout)
 
 ## Install
 ```bash
@@ -80,7 +96,8 @@ handles the version differences it knows about (warmup arguments, chat-template 
 DeepSeek's do; some providers' terms forbid training competing models.
 
 ## Quick start
-GSM8K end to end (the commands are the same for any task):
+The whole workflow on the included GSM8K example. For your own task, set `T` to its import path; the
+commands stay the same.
 ```bash
 export DEEPSEEK_API_KEY=...
 T=tasks.math.gsm8k:GSM8KTask
@@ -100,6 +117,82 @@ python -m distillops grpo configs/grpo_gsm8k_qwen3_0.6b.yaml --task $T \
 python -m distillops eval    --task $T --model checkpoints/gsm8k_0.6b_grpo           # 66.8%
 python -m distillops cost                                                          # teacher spend so far
 ```
+
+## Add your own task
+A complete task: support tickets classified into a fixed label set, with the teacher explaining its
+choice. Save it as e.g. `my_tasks/triage.py`.
+
+```python
+import json
+import re
+
+from distillops.task import Task, Verdict
+
+
+class TicketTriage(Task):
+    name = "triage"
+    LABELS = ["billing", "bug", "feature", "other"]
+
+    def load_examples(self, split):  # any source; here JSONL rows {"id", "text", "label"}
+        with open(f"data/triage_{split}.jsonl", encoding="utf-8") as f:
+            return [json.loads(line) for line in f]
+
+    def example_id(self, ex):
+        return ex["id"]
+
+    def teacher_messages(self, ex, attempt):
+        return [{"role": "user", "content": f"{ex['text']}\n\nExplain in one or two sentences which "
+                 f"team should handle this, then end with: LABEL: <one of {', '.join(self.LABELS)}>"}]
+
+    def parse_teacher(self, ex, text):
+        found = re.findall(r"LABEL:\s*(\w+)", text)
+        return found[-1].lower() if found else None
+
+    def verify(self, ex, parsed, text, attempt):
+        if parsed not in self.LABELS:
+            return Verdict(False, "parse_error")
+        return Verdict(parsed == ex["label"], "ok" if parsed == ex["label"] else "wrong_label")
+
+    def sft_example(self, ex, parsed, text):
+        return {"prompt": self.student_messages(ex), "completion": [{"role": "assistant", "content": text}]}
+
+    def student_messages(self, ex):
+        return [{"role": "user", "content": f"{ex['text']}\n\nEnd with: LABEL: <one of {', '.join(self.LABELS)}>"}]
+
+    def score(self, ex, completion):
+        return float(self.parse_teacher(ex, completion) == ex["label"])
+
+    def gold_sft_example(self, ex):  # optional: the no-teacher control for `labels`
+        return {"prompt": self.student_messages(ex),
+                "completion": [{"role": "assistant", "content": f"LABEL: {ex['label']}"}]}
+```
+
+```bash
+python scripts/check_task.py --task my_tasks.triage:TicketTriage      # data, prompts, masked SFT row: check before paying
+python -m distillops teacher --task my_tasks.triage:TicketTriage --n 50 # then labels / sft / eval / grpo as in Quick start
+```
+
+The methods, with the included GSM8K example for comparison:
+
+| Method | Purpose | GSM8K |
+|---|---|---|
+| `load_examples(split)` | your dataset (a `valid` split, if any, is used for GRPO validation) | `datasets.load_dataset("openai/gsm8k")` |
+| `example_id(ex)` | stable id (logging, resume, `--exclude`, `--keep-ids`) | `"gsm8k:train:17"` |
+| `teacher_messages(ex, attempt)` | prompt for the teacher | question + "end with `ANSWER: <number>`" |
+| `parse_teacher(ex, text)` | raw text -> structured answer | steps + final number |
+| `verify(ex, parsed, text, attempt)` | **the distillation filter** | number equals gold, length limit |
+| `sft_example(ex, parsed, text)` | accepted output -> training row | `<think>steps</think>ANSWER: n` |
+| `student_messages(ex)` | the student's prompt | question + answer-format instruction |
+| `score(ex, completion)` | metric **and** GRPO reward, in [0, 1] | 1 if the final number is right |
+| `gold_sft_example(ex)` *(optional)* | label-only control row | `ANSWER: n`, or the human solution |
+| `evaluate(...)` *(optional)* | custom decoding | - (recommendation overrides it with constrained beam search) |
+
+Constructor arguments can be passed on the command line, e.g. `--task-arg max_words=200`.
+
+**Writing a good verifier is most of the work.** Teachers break instructions in ways that would
+teach the student the wrong thing (e.g. referring to information only the teacher saw); `verify` is
+where those outputs are dropped. Read accepted samples before scaling up. If GRPO's pass-rate filter
+reports a sparse reward, a `score` that gives partial credit is the first thing to try.
 
 ## Commands
 `python -m distillops <command> --help` lists every flag. Commands that read a dataset share
@@ -187,34 +280,6 @@ With LoRA, a merged copy is saved to `output_dir/merged` for evaluation and serv
 | `grpo --filter-only` | `output_dir/pass_rate_filter.json` (statistics and advice), `output_dir/pass_rate_kept.txt` |
 | `grpo` | `output_dir/` = **best model on validation** (a copy of the start model if nothing beat it), `output_dir/last/` = final model, `output_dir/validation.json` (scores per check, best step, weight change, entropy stop) |
 
-## Add your own task
-Subclass `distillops.task.Task`. Six methods produce teacher data; two more enable eval and GRPO.
-`tasks/math/gsm8k.py` (~150 lines) is the worked example.
-
-| Method | Purpose | GSM8K |
-|---|---|---|
-| `load_examples(split)` | your dataset (a `valid` split, if any, is used for GRPO validation) | `datasets.load_dataset("openai/gsm8k")` |
-| `example_id(ex)` | stable id (logging, resume, `--exclude`, `--keep-ids`) | `"gsm8k:train:17"` |
-| `teacher_messages(ex, attempt)` | prompt for the teacher | question + "end with `ANSWER: <number>`" |
-| `parse_teacher(ex, text)` | raw text -> structured answer | steps + final number |
-| `verify(ex, parsed, text, attempt)` | **the distillation filter** | number equals gold, length limit |
-| `sft_example(ex, parsed, text)` | accepted output -> training row | `<think>steps</think>ANSWER: n` |
-| `student_messages(ex)` | the student's prompt | question + answer-format instruction |
-| `score(ex, completion)` | metric **and** GRPO reward, in [0, 1] | 1 if the final number is right |
-| `gold_sft_example(ex)` *(optional)* | label-only control row | `ANSWER: n`, or the human solution |
-| `evaluate(...)` *(optional)* | custom decoding | - (recommendation overrides it with constrained beam search) |
-
-Then run it by import path, with constructor arguments if needed:
-```bash
-python scripts/check_task.py --task my_pkg.my_task:MyTask      # data, teacher prompt, masked SFT row: check before paying
-python -m distillops teacher --task my_pkg.my_task:MyTask --task-arg max_words=200
-```
-
-**Writing a good verifier is most of the work.** Teachers break instructions in ways that would
-teach the student the wrong thing (e.g. referring to information only the teacher saw); `verify` is
-where those outputs are dropped. Read accepted samples before scaling up. If GRPO's pass-rate filter
-reports a sparse reward, a `score` that gives partial credit is the first thing to try.
-
 ## What the framework handles
 - **Teacher client** (`distillops/teacher.py`): any OpenAI-compatible API; configurable concurrency,
   retries with backoff, an on-disk response cache (re-runs are free), a cost meter, and optional
@@ -244,7 +309,10 @@ Each one comes from a real failure; [docs/PITFALLS.md](docs/PITFALLS.md) has the
 | GRPO entropy collapse: the policy memorises one answer per prompt | stop when entropy stays below 10% of the run's own starting value (relative, so no task-specific threshold) |
 | Training reward rises while held-out quality falls | validation-based checkpoint selection; `output_dir` keeps the best model, or the start model if nothing beats it |
 
-## Results
+## Included examples and results
+The two example tasks exist to show the workflow and what it achieves; their code lives in `tasks/`
+and is not needed to use the framework on your own task.
+
 
 ### Math: GSM8K (Qwen3-0.6B student, all 1,319 test problems)
 | Student | Accuracy |
@@ -308,7 +376,7 @@ standard fix and is not yet measured.
    SASRec by 22-24% HR@10, and a two-stage recall + re-rank matched recent LLM recommenders, at
    unchanged serving cost.
 
-## Reproduce the recommendation results
+### Reproduce the recommendation example
 ```bash
 C=Industrial_and_Scientific
 python scripts/rec_prepare.py --category $C          # data download, popularity baseline, first SASRec
@@ -351,11 +419,12 @@ python scripts/rec_two_stage.py --summarise results/$C/two_stage
 ```
 distillops/       the framework: teacher, task interface, rejection sampling, sft, evaluate, grpo,
                   precision / memory / preflight, cli
-tasks/math/       GSM8K task (tutorial example)
-tasks/rec/        recommendation: data, SASRec baseline and distillation, prompts, title trie,
+tasks/            the two included example tasks (not needed for your own):
+  math/           GSM8K, also the reference implementation of a Task
+  rec/            recommendation: data, SASRec baseline and distillation, prompts, title trie,
                   constrained beams, item embeddings; resources/ holds the SFT user list
-scripts/          check_task.py; recommendation: prepare, SASRec sweep, build SFT data, LLM / SASRec eval,
-                  paired comparison, SASRec distillation, two-stage
+scripts/          check_task.py (any task); rec_*.py: the recommendation example (prepare, SASRec sweep,
+                  build SFT data, LLM / SASRec eval, paired comparison, SASRec distillation, two-stage)
 configs/          teacher, SFT and GRPO configs (example settings)
 docs/PITFALLS.md  every silent failure met so far, its cause and the guard now in code
 tests/            unit tests; no network or GPU needed
