@@ -258,7 +258,7 @@ def test_default_request_fields_keep_older_cache_keys():
     assert TeacherConfig(base_url="x", model="m").request_params() == {"temperature": 1.0, "max_tokens": 1024}
 
 
-async def test_cost_counts_only_this_teacher(tmp_path, capsys):
+async def test_usage_counts_only_this_teacher(tmp_path, capsys):
     from distillops import cli
 
     msgs = [{"role": "user", "content": "q"}]
@@ -266,10 +266,12 @@ async def test_cost_counts_only_this_teacher(tmp_path, capsys):
     await _teacher(tmp_path, _Client(), base_url="https://b/v1").complete(msgs)
     cfg = tmp_path / "t.yaml"
     cfg.write_text(f"base_url: https://a/v1\nmodel: m\ncache_path: {tmp_path / 'c.sqlite'}\n"
-                   "price: {input_cache_miss: 1000000, output: 0}\n")
-    cli.main(["cost", "--teacher", str(cfg)])
+                   "price: {input_cache_miss: 1.0, output: 4.0}\n")  # an older config: price is ignored
+    cli.main(["usage", "--teacher", str(cfg)])
     out = capsys.readouterr().out
-    assert "calls 1 " in out and "cost 10.0000" in out and "1 cached calls from other teachers" in out
+    assert "price` is no longer used" in out
+    assert "calls 1 " in out and "prompt tokens 10 " in out and "completion tokens 5" in out
+    assert "1 cached calls from other teachers" in out and "cost" not in out.lower()
 
 
 # -- B8 / B9: generic chat-template options and dataset-level metrics -------------------------------

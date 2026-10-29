@@ -5,14 +5,10 @@ model: deepseek-flash
 api_key_env: DEEPSEEK_API_KEY
 temperature: 0.7          # > 0 so retries in rejection sampling give different answers
 max_tokens: 600           # short rationale + answer line
-max_concurrency: 256      # price is per token, so more concurrency only finishes sooner
+max_concurrency: 256      # parallel requests
 # Provider-specific request options go in extra_body; here DeepSeek's thinking mode is turned off so the
 # rationale is written in the answer itself (short and controllable).
 extra_body:
   thinking:
     type: disabled
-price:                    # per 1M tokens; the cost meter reports in this currency (here CNY)
-  input_cache_hit: 0.02
-  input_cache_miss: 1.0
-  output: 4.0
 cache_path: cache/teacher_deepseek.sqlite

@@ -104,7 +104,7 @@ the memory that is free when the run starts.
 
 | Step | Needs |
 |---|---|
-| `teacher`, `labels`, `cost` | no GPU (API calls and files) |
+| `teacher`, `labels`, `usage` | no GPU (API calls and files) |
 | `sft`, `eval` | a CUDA GPU; without one they run on the CPU, which is practical only for small models |
 | `grpo` with vLLM (default), pass-rate filter | Linux and a CUDA GPU; `use_vllm: false` runs anywhere, more slowly |
 
@@ -125,7 +125,7 @@ What adapts and what does not:
 ## Quick start
 The whole workflow on the included GSM8K example. For your own task, set `T` to its import path; the
 commands stay the same. The teacher can be any OpenAI-compatible API: copy
-`configs/teacher_template.yaml`, set `base_url`, `model`, `api_key_env` and `price`, and export the key.
+`configs/teacher_template.yaml`, set `base_url`, `model` and `api_key_env`, and export the key.
 ```bash
 cp configs/teacher_template.yaml configs/my_teacher.yaml       # then edit it for your provider
 export TEACHER_API_KEY=...                                      # the variable named by api_key_env
@@ -151,7 +151,7 @@ python -m distillops grpo configs/grpo_gsm8k_qwen3_0.6b.yaml --task $T --filter-
 python -m distillops grpo configs/grpo_gsm8k_qwen3_0.6b.yaml --task $T \
          --keep-ids checkpoints/gsm8k_0.6b_grpo/pass_rate_kept.txt --epochs 1
 python -m distillops eval    --task $T --model checkpoints/gsm8k_0.6b_grpo           # 66.8%
-python -m distillops cost    --teacher $TEACHER                                     # teacher spend so far
+python -m distillops usage   --teacher $TEACHER                                     # teacher calls and tokens
 ```
 The included results used DeepSeek as the teacher (`configs/teacher_deepseek.yaml`); the GSM8K
 teacher calls cost 3.79 CNY (3.74 for the full run, 0.05 for the 100-problem smoke test).
@@ -242,13 +242,13 @@ arguments, repeatable), `--split`, `--n` (random subset, 0 = all) and `--seed`.
 | Command | What it does | Main flags |
 |---|---|---|
 | `doctor` | environment report and platform warnings | - |
-| `teacher` | teacher outputs -> `verify` -> accepted SFT rows, with retries; a rerun resumes, and refuses a folder made with another teacher or task settings | `--teacher` (config, required), `--max-attempts` (3), `--out` |
+| `teacher` | teacher outputs -> `verify` -> accepted SFT rows, with retries; a rerun resumes, and refuses a folder made with another teacher, task settings, teacher prompt or task code | `--teacher` (config, required), `--max-attempts` (3), `--out` |
 | `labels` | label-only SFT rows from `gold_sft_example` (the no-teacher control) | `--out` |
 | `sft` | supervised fine-tuning from a YAML config | `--train_file`, `--output_dir`, `--model`, `--epochs`, `--chat-template` (override the config) |
 | `eval` | generate with a student and score with `Task.score` | `--model`, `--max-new-tokens` (512), `--batch` (0 = auto), `--template-arg KEY=VALUE`, `--no-think` (= `enable_thinking=false`), `--chat-template`, `--tag`, `--out` |
 | `grpo` | GRPO with `Task.score` as the reward | `--model`, `--filter-samples N`, `--filter-only`, `--filter-gpu-memory` (0.4), `--keep-ids`, `--exclude`, `--epochs`, `--max-steps`, `--eval-every`, `--eval-examples`, `--chat-template`, `--template-arg`, `--output_dir` |
 | `merge` | merge a LoRA adapter into its base model | `--base`, `--adapter`, `--out` |
-| `cost` | teacher spend from the local response cache | `--teacher` (required) |
+| `usage` | teacher calls and tokens (prompt, provider prompt-cache hits, completion) from the local response cache | `--teacher` (required) |
 
 `grpo` details: `--filter-samples 8 --filter-only` samples 8 completions per prompt with vLLM (same
 temperature, length limits and prompt truncation as GRPO), keeps the prompts whose samples differ in
@@ -270,10 +270,9 @@ something itself (micro-batch, precision, validation source), it prints what it 
 | `max_tokens` | 1024 | per call; `null` = not sent |
 | `max_tokens_param` | `max_tokens` | request field for `max_tokens`; OpenAI's reasoning models need `max_completion_tokens` |
 | `max_concurrency` | 32 | parallel requests; raise it if your provider allows |
-| `timeout_s`, `max_retries` | 300, 6 | per request; retries back off exponentially (not on 400/401/403/404) |
+| `timeout_s`, `max_retries` | 300, 6 | per request; retries (exponential backoff) only for network errors, timeouts, replies without a completion, 408/409/429 and 5xx |
 | `extra_body` | `{}` | provider-specific request options, passed through unchanged |
-| `price` | 0 | `input_cache_hit`, `input_cache_miss`, `output` per 1M tokens, in any currency; only for the cost meter. Prompt-cache hits are read from either `prompt_cache_hit_tokens` or `prompt_tokens_details.cached_tokens` |
-| `cache_path` | `cache/teacher.sqlite` | response cache: identical requests to the same endpoint are never paid twice; teachers can share the file (`cost` counts each separately) |
+| `cache_path` | `cache/teacher.sqlite` | response cache: an identical request to the same endpoint is never sent twice; teachers can share the file (`usage` counts each separately) |
 
 ### Student model
 Any causal language model can be the student: set `model` in the SFT or GRPO config, or pass
@@ -338,7 +337,7 @@ optimizer state and every checkpoint); disk space for what will be written is ch
 ## Outputs
 | Command | Writes |
 |---|---|
-| `teacher` | `results/<task>/teacher_<split>_n<n>[_<task args>]/`: `run.json` (teacher and task settings), `accepted.jsonl` (SFT rows), `log.jsonl` (every attempt and verdict; reruns resume from it), `stats.json` (yield, rejection reasons, tokens, cost) |
+| `teacher` | `results/<task>/teacher_<split>_n<n>[_<task args>]/`: `run.json` (teacher, task settings, and hashes of the teacher prompt and task code), `accepted.jsonl` (SFT rows), `log.jsonl` (every attempt and verdict; reruns resume from it), `stats.json` (yield, rejection reasons, token usage) |
 | `labels` | `data/sft/<task>/labels_<split>_n<n>[_<task args>].jsonl` |
 | `sft` | `output_dir/` (adapter), `output_dir/merged/` (merged model), `sft_summary.json` |
 | `eval` | `results/<task>/eval/<tag>/metrics.json` and `predictions.jsonl` (every completion and its score); `<tag>` defaults to the model folder's name (`<run>-merged` for an SFT model) |
@@ -347,7 +346,8 @@ optimizer state and every checkpoint); disk space for what will be written is ch
 
 ## What the framework handles
 - **Teacher client** (`distillops/teacher.py`): any OpenAI-compatible API; configurable concurrency,
-  retries with backoff, an on-disk response cache (re-runs are free) and a cost meter.
+  retries with backoff for network errors, rate limits and server errors only, an on-disk response cache
+  (a re-run sends no repeated request) and a token counter.
 - **Adaptive rejection sampling** (`distillops/rejection.py`): retry only failed examples, up to
   `--max-attempts`; append-only logs so a killed run resumes where it stopped.
 - **SFT** (`distillops/sft.py`): TRL, completion-only loss, over-long rows dropped (never truncated),
@@ -372,7 +372,9 @@ Each one comes from a real failure.
 | Checkpoints with optimizer state fill the disk at the final save | weights-only checkpoints, one kept; refuse to start if the disk cannot hold the run |
 | vLLM starts after the model has loaded and only then finds its reserved share of the GPU unavailable | free memory checked first; the error names the setting to lower |
 | GRPO on prompts whose samples all score the same (always right, always wrong, or the same partial credit) learns nothing | pass-rate filter keeps prompts whose samples differ, with plain-language advice; `--epochs` sizes the run to the kept prompts |
-| Rerunning `teacher` with another teacher or task setting into the same folder mixes two runs (finished examples are skipped) | each run folder records its settings in `run.json`, a mismatch stops the run; task arguments are part of default paths |
+| Rerunning `teacher` with another teacher, task setting, teacher prompt or task code into the same folder mixes two runs (finished examples are skipped) | each run folder records its settings and hashes of the prompt and task code in `run.json`, a mismatch stops the run; task arguments are part of default paths |
+| A local error (e.g. an outdated package) is retried like a network error and every example is marked failed | only network errors, timeouts, 408/409/429 and 5xx are retried; other HTTP errors are recorded for that request; a local error or a wrong key, permission or model (401/403/404) stops the run at once with the cause, before any further request |
+| A task whose ids are numbers never matches the ids read back from files (`--keep-ids` would keep nothing) | ids must be non-empty, unique strings, checked before any run; ids read from files are compared as text |
 | GRPO entropy collapse: the policy memorises one answer per prompt | stop when entropy stays below 10% of the run's own starting value (relative, so no task-specific threshold) |
 | Training reward rises while held-out quality falls | validation-based checkpoint selection; `output_dir` keeps the best model, or the start model if nothing beats it |
 | Code that only fits one model family: gpt2 names its layer count `n_layer`, base models have no chat template, and without CUDA transformers trains on Apple's MPS, where gpt2's attention dropout fails | sizes read under each architecture's config names; a plain chat template saved with the model; CPU training when there is no CUDA GPU |

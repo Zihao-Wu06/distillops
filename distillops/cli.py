@@ -6,7 +6,7 @@
     python -m distillops eval    --task tasks.math.gsm8k:GSM8KTask --model <ckpt> --n 500
     python -m distillops grpo    configs/grpo_gsm8k_qwen3_0.6b.yaml --task tasks.math.gsm8k:GSM8KTask --filter-samples 8
     python -m distillops merge   --base Qwen/Qwen3-1.7B --adapter <lora_dir> --out <merged_dir>
-    python -m distillops cost    --teacher <teacher.yaml>                           # teacher spend so far
+    python -m distillops usage   --teacher <teacher.yaml>                           # teacher calls and tokens
     python -m distillops doctor                                                       # check this machine first
 
 `--task` is `module:Class` or a YAML file with `task:` and `args:`. Constructor
@@ -95,19 +95,52 @@ def _task_args(p: argparse.ArgumentParser, split: str) -> None:
     p.add_argument("--seed", type=int, default=0)
 
 
-def cmd_teacher(a: argparse.Namespace) -> None:
-    from .rejection import rejection_sample
-    from .teacher import Teacher, TeacherConfig
+def task_fingerprint(task: Any, examples: list[Any]) -> dict[str, str | None]:
+    """Hashes that change when the teacher's prompt or the task's code changes, so a resumed run
+    cannot mix data made two ways. `teacher_prompt`: the prompts (first attempt and a retry) for
+    the split's example with the smallest id, so it does not depend on --n (a prompt built from
+    unseeded randomness or set order differs in every process, so such a run cannot resume).
+    `task_code`: the source file defining the task class (helper modules it imports are not
+    covered)."""
+    import hashlib
+    import inspect
+    import json
 
-    from .rejection import check_run_settings
+    from .task import check_ids
+
+    def digest(text: str) -> str:
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+    ids = check_ids(task, examples)
+    prompt = None
+    if examples:
+        probe = examples[min(range(len(ids)), key=ids.__getitem__)]
+        try:
+            retry = task.teacher_messages(probe, 1)
+        except Exception as e:  # a task with one prompt only (used with --max-attempts 1)
+            retry = f"no retry prompt: {type(e).__name__}"
+        prompt = digest(json.dumps([task.teacher_messages(probe, 0), retry], sort_keys=True, ensure_ascii=False,
+                                   default=str))
+    try:
+        code = digest(Path(inspect.getsourcefile(type(task))).read_text(encoding="utf-8"))
+    except (OSError, TypeError):  # a class defined interactively has no source file
+        code = None
+    return {"teacher_prompt": prompt, "task_code": code}
+
+
+def cmd_teacher(a: argparse.Namespace) -> None:
+    from .rejection import check_run_settings, rejection_sample
+    from .teacher import Teacher, TeacherConfig
 
     tcfg = TeacherConfig.from_yaml(a.teacher)
     spec, kwargs = task_spec(a.task, a.task_arg)
     task = load_task(a.task, a.task_arg)
-    examples = subsample(task.load_examples(a.split), a.n, a.seed)
+    split = task.load_examples(a.split)
+    examples = subsample(split, a.n, a.seed)
     out = Path(a.out or f"results/{task.name}/teacher_{a.split}_n{a.n}{args_suffix(kwargs)}")
-    # a rerun resumes this folder, so it must come from the same teacher and task settings
-    check_run_settings(out, {"task": spec, "task_args": kwargs, "split": a.split, "teacher": tcfg.identity()})
+    # a rerun resumes this folder, so it must come from the same teacher, prompt, code and task settings
+    check_run_settings(out, {"task": spec, "task_args": kwargs, "split": a.split, "teacher": tcfg.identity(),
+                             **task_fingerprint(task, split)})
     teacher = Teacher(tcfg)
     stats = asyncio.run(rejection_sample(task, teacher, examples, out, a.max_attempts))
     print(stats)
@@ -157,7 +190,7 @@ def _exclude(task: Any, examples: list[Any], path: str | None) -> list[Any]:
         return examples
     from .io import read_jsonl
 
-    seen = {r.get("meta", {}).get("id") for r in read_jsonl(path)}
+    seen = {str(i) for i in (r.get("meta", {}).get("id") for r in read_jsonl(path)) if i is not None}
     return [ex for ex in examples if task.example_id(ex) not in seen]
 
 
@@ -180,14 +213,18 @@ def cmd_grpo(a: argparse.Namespace) -> None:
         cfg.eval_every = a.eval_every
     if a.eval_examples is not None:
         cfg.eval_examples = a.eval_examples
-    examples = subsample(_exclude(task, task.load_examples(a.split), a.exclude), a.n, a.seed)
+    from .task import check_ids
+
+    split = task.load_examples(a.split)
+    check_ids(task, split)  # before --exclude / --keep-ids compare them with ids read from files
+    examples = subsample(_exclude(task, split, a.exclude), a.n, a.seed)
     valid: list = []
     if cfg.eval_every > 0 and cfg.eval_examples > 0 and not a.filter_only:
         # chosen before --keep-ids / filtering, deterministically, so held-out prompts never reach training
         examples, valid, source = split_validation(task, examples, cfg.eval_examples, a.seed)
         print(f"validation: {len(valid)} prompts ({source}), checked every {cfg.eval_every} steps", flush=True)
     if a.keep_ids:  # prompts kept by an earlier --filter-only run
-        keep = set(Path(a.keep_ids).read_text(encoding="utf-8").split())
+        keep = {line.strip() for line in Path(a.keep_ids).read_text(encoding="utf-8").splitlines() if line.strip()}
         examples = [ex for ex in examples if task.example_id(ex) in keep]
         print(f"{len(examples)} prompts from {a.keep_ids}", flush=True)
     if a.filter_samples:
@@ -236,7 +273,8 @@ def cmd_merge(a: argparse.Namespace) -> None:
     print(f"merged {a.adapter} into {a.base} -> {a.out}")
 
 
-def cmd_cost(a: argparse.Namespace) -> None:
+def cmd_usage(a: argparse.Namespace) -> None:
+    """Calls and tokens of every request this teacher answered, from its response cache."""
     import json
     import sqlite3
 
@@ -249,16 +287,14 @@ def cmd_cost(a: argparse.Namespace) -> None:
     for (v,) in sqlite3.connect(cfg.cache_path).execute("SELECT v FROM kv"):
         r = json.loads(v)
         if "base_url" in r and (r["base_url"], r.get("model")) != (cfg.base_url, cfg.model):
-            other += 1  # another teacher sharing this cache file: priced by its own config
+            other += 1  # another teacher sharing this cache file
             continue
         legacy += "base_url" not in r
         n, prompt, hit, out = n + 1, prompt + r["prompt_tokens"], hit + r["cache_hit_tokens"], out + r["completion_tokens"]
-    p = cfg.price
-    cost = ((prompt - hit) * p.input_cache_miss + hit * p.input_cache_hit + out * p.output) / 1e6
-    print(f"{cfg.model} at {cfg.base_url}: calls {n:,} | input {prompt:,} (cache hit {hit:,}) | output {out:,} | "
-          f"cost {cost:,.4f} (in the currency of `price` in {a.teacher})")
+    print(f"{cfg.model} at {cfg.base_url}: calls {n:,} | prompt tokens {prompt:,} (provider cache hits {hit:,}) | "
+          f"completion tokens {out:,}")
     if other:
-        print(f"note: {other:,} cached calls from other teachers are not counted (run cost with their configs)")
+        print(f"note: {other:,} cached calls from other teachers are not counted (run usage with their configs)")
     if legacy:
         print(f"note: {legacy:,} of these calls were cached before the teacher was recorded and are assumed "
               "to be this teacher's")
@@ -338,9 +374,9 @@ def main(argv: list[str] | None = None) -> None:
     p = sub.add_parser("doctor", help="environment report: GPU, precision, memory, disk, versions")
     p.set_defaults(fn=cmd_doctor)
 
-    p = sub.add_parser("cost", help="teacher spend from the local response cache")
-    p.add_argument("--teacher", required=True, help="teacher config YAML (its cache_path and price)")
-    p.set_defaults(fn=cmd_cost)
+    p = sub.add_parser("usage", help="teacher calls and tokens, from the local response cache")
+    p.add_argument("--teacher", required=True, help="teacher config YAML (its cache_path, base_url and model)")
+    p.set_defaults(fn=cmd_usage)
 
     a = ap.parse_args(argv)
     a.fn(a)

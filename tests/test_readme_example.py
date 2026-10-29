@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from distillops.rejection import rejection_sample
-from distillops.teacher import Price, Teacher, TeacherConfig
+from distillops.teacher import Teacher, TeacherConfig
 
 README = Path(__file__).resolve().parents[1] / "README.md"
 
@@ -55,7 +55,7 @@ class FakeClient:
 
 async def test_readme_task_runs_through_rejection_sampling(tmp_path):
     task = readme_task_class()()
-    cfg = TeacherConfig(base_url="x", model="m", cache_path=str(tmp_path / "c.sqlite"), price=Price(output=1.0))
+    cfg = TeacherConfig(base_url="x", model="m", cache_path=str(tmp_path / "c.sqlite"))
     stats = await rejection_sample(task, Teacher(cfg, client=FakeClient()), EXS, tmp_path / "out", max_attempts=3)
     assert stats["accepted"] == 2 and stats["attempts_until_accept"] == {2: 2}
     assert stats["rejection_reasons"] == {"wrong_label": 2}

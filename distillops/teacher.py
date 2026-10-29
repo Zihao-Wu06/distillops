@@ -1,11 +1,12 @@
 """Black-box teacher client for any OpenAI-compatible chat-completions endpoint.
 
 Features that matter for a distillation run:
-- disk cache: re-running a pipeline never pays twice for the same request;
+- disk cache: re-running a pipeline never sends the same request twice;
 - `sample_id`: distinct cache keys for repeated samples of one prompt
   (needed by rejection sampling, where we retry the same question);
-- bounded concurrency + exponential-backoff retries;
-- a cost meter in the currency of the configured prices.
+- bounded concurrency; retries with exponential backoff for network errors, timeouts, rate
+  limits and server errors only (anything else is raised at once, see `is_transient`);
+- a usage counter (calls, prompt / cached / completion tokens).
 """
 
 from __future__ import annotations
@@ -24,16 +25,6 @@ import yaml
 
 
 @dataclass
-class Price:
-    """Price per 1M tokens, in any currency (the cost meter reports in the same one).
-    `input_cache_hit` applies to prompt tokens the provider served from its prompt cache."""
-
-    input_cache_hit: float = 0.0
-    input_cache_miss: float = 0.0
-    output: float = 0.0
-
-
-@dataclass
 class TeacherConfig:
     base_url: str
     model: str
@@ -46,7 +37,6 @@ class TeacherConfig:
     timeout_s: float = 300.0
     max_retries: int = 6
     extra_body: dict[str, Any] = field(default_factory=dict)
-    price: Price = field(default_factory=Price)
     cache_path: str = "cache/teacher.sqlite"
 
     def __post_init__(self) -> None:
@@ -57,7 +47,10 @@ class TeacherConfig:
     @classmethod
     def from_yaml(cls, path: str | Path) -> "TeacherConfig":
         raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
-        raw["price"] = Price(**(raw.get("price") or {}))
+        if "price" in raw:  # configs written for older versions
+            raw.pop("price")
+            print(f"note: {path}: `price` is no longer used (distillops reports token usage, not money); ignored",
+                  flush=True)
         return cls(**raw)
 
     def request_params(self, **overrides: Any) -> dict[str, Any]:
@@ -101,18 +94,18 @@ class Completion:
     prompt_tokens: int
     completion_tokens: int
     cache_hit_tokens: int
-    cached: bool  # served from our local disk cache (cost 0)
-    cost: float  # in the currency of the configured prices
+    cached: bool  # served from our local disk cache (no request sent)
 
 
-class CostMeter:
+class UsageMeter:
+    """Calls and tokens of the requests actually sent (local-cache hits are counted apart)."""
+
     def __init__(self) -> None:
         self.calls = 0
         self.cache_served = 0
         self.prompt_tokens = 0
         self.cache_hit_tokens = 0
         self.completion_tokens = 0
-        self.cost = 0.0
 
     def add(self, c: Completion) -> None:
         self.calls += 1
@@ -122,20 +115,67 @@ class CostMeter:
         self.prompt_tokens += c.prompt_tokens
         self.cache_hit_tokens += c.cache_hit_tokens
         self.completion_tokens += c.completion_tokens
-        self.cost += c.cost
 
     def summary(self) -> dict[str, Any]:
-        paid = self.calls - self.cache_served
+        sent = self.calls - self.cache_served
         return {
             "calls": self.calls,
             "served_from_local_cache": self.cache_served,
-            "paid_calls": paid,
+            "sent_to_api": sent,
             "prompt_tokens": self.prompt_tokens,
             "api_cache_hit_tokens": self.cache_hit_tokens,
             "completion_tokens": self.completion_tokens,
-            "avg_completion_tokens": round(self.completion_tokens / paid, 1) if paid else 0,
-            "cost": round(self.cost, 4),
+            "avg_completion_tokens": round(self.completion_tokens / sent, 1) if sent else 0,
         }
+
+
+RETRY_STATUS = (408, 409, 429)  # plus every 5xx
+
+
+class BadResponseError(RuntimeError):
+    """The endpoint answered, but not with a chat completion (e.g. HTTP 200 with an error body
+    from a gateway, or a body that is not valid JSON). Treated like a network error."""
+
+
+def http_status(e: BaseException) -> int | None:
+    status = getattr(e, "status_code", None)
+    return status if isinstance(status, int) else None
+
+
+def is_connection_error(e: BaseException) -> bool:
+    """The request did not get an HTTP answer (connection refused or reset, DNS, timeout)."""
+    try:
+        import openai
+
+        if isinstance(e, openai.APIConnectionError):  # includes APITimeoutError
+            return True
+    except ImportError:
+        pass
+    return isinstance(e, (TimeoutError, asyncio.TimeoutError, ConnectionError))
+
+
+def is_transient(e: BaseException) -> bool:
+    """Worth retrying: network errors, timeouts, rate limits and server errors. Everything else
+    (a bad request, a wrong key, a missing model, or a bug or broken package on this machine)
+    fails the same way on every retry."""
+    if isinstance(e, BadResponseError):
+        return True
+    status = http_status(e)
+    if status is not None:
+        return status in RETRY_STATUS or status >= 500
+    return is_connection_error(e)
+
+
+def is_request_error(e: BaseException) -> bool:
+    """An error about this one request (other requests can still succeed): an HTTP error other
+    than a wrong key, missing permission or unknown model, or a network error that outlasted the
+    retries. Anything else is a problem with the setup and should stop the run."""
+    if isinstance(e, BadResponseError):
+        return True
+    status = http_status(e)
+    if status is not None:
+        return status not in (401, 403, 404)
+    return is_connection_error(e)
 
 
 class _DiskCache:
@@ -154,16 +194,10 @@ class _DiskCache:
         self.db.commit()
 
 
-def _cost(cfg: TeacherConfig, prompt: int, hit: int, completion: int) -> float:
-    p = cfg.price
-    miss = max(prompt - hit, 0)
-    return (hit * p.input_cache_hit + miss * p.input_cache_miss + completion * p.output) / 1e6
-
-
 class Teacher:
     def __init__(self, cfg: TeacherConfig, client: Any | None = None) -> None:
         self.cfg = cfg
-        self.meter = CostMeter()
+        self.meter = UsageMeter()
         self._sem = asyncio.Semaphore(cfg.max_concurrency)
         self._cache = _DiskCache(cfg.cache_path)
         if client is None:  # real API client; tests inject a fake one
@@ -198,15 +232,15 @@ class Teacher:
         key, hit = self._cached(messages, sample_id, {**params, "extra_body": extra})
         if hit is not None:
             fields = {k: v for k, v in hit.items() if k in Completion.__dataclass_fields__}
-            c = Completion(**{**fields, "cached": True, "cost": 0.0})
+            c = Completion(**{**fields, "cached": True})
             self.meter.add(c)
             return c
 
         async with self._sem:
             resp = await self._call_with_retry(messages, params, extra)
 
-        msg = resp.choices[0].message
-        usage = resp.usage
+        msg = resp.choices[0].message  # shape checked in _call_with_retry
+        usage = getattr(resp, "usage", None)
         prompt = int(getattr(usage, "prompt_tokens", 0) or 0)
         completion = int(getattr(usage, "completion_tokens", 0) or 0)
         hit_tokens = cached_prompt_tokens(usage)
@@ -217,10 +251,9 @@ class Teacher:
             completion_tokens=completion,
             cache_hit_tokens=hit_tokens,
             cached=False,
-            cost=_cost(self.cfg, prompt, hit_tokens, completion),
         )
-        record = {k: v for k, v in c.__dict__.items() if k not in ("cached", "cost")}
-        record.update(model=self.cfg.model, base_url=self.cfg.base_url)  # lets `cost` count per teacher
+        record = {k: v for k, v in c.__dict__.items() if k != "cached"}
+        record.update(model=self.cfg.model, base_url=self.cfg.base_url)  # lets `usage` count per teacher
         self._cache.put(key, record)
         self.meter.add(c)
         return c
@@ -229,12 +262,20 @@ class Teacher:
         delay = 2.0
         for attempt in range(self.cfg.max_retries + 1):
             try:
-                return await self.client.chat.completions.create(
-                    model=self.cfg.model, messages=messages, extra_body=extra or None, **params
-                )
-            except Exception as e:  # rate limits, timeouts, 5xx
-                status = getattr(e, "status_code", None)
-                if status in (400, 401, 403, 404) or attempt == self.cfg.max_retries:
+                try:
+                    resp = await self.client.chat.completions.create(
+                        model=self.cfg.model, messages=messages, extra_body=extra or None, **params
+                    )
+                except json.JSONDecodeError as e:  # a 200 whose body is not JSON
+                    raise BadResponseError(f"the endpoint's reply is not valid JSON: {e}") from e
+                choices = getattr(resp, "choices", None)
+                if not isinstance(choices, list) or not choices or getattr(choices[0], "message", None) is None:
+                    error = getattr(resp, "error", None)  # e.g. {"error": {...}} sent with HTTP 200
+                    raise BadResponseError(f"the endpoint answered without a completion"
+                                           f"{f': {error}' if error else f' ({type(resp).__name__})'}")
+                return resp
+            except Exception as e:
+                if not is_transient(e) or attempt == self.cfg.max_retries:
                     raise
                 await asyncio.sleep(delay + random.random())
                 delay = min(delay * 2, 60)

@@ -5,7 +5,7 @@ import pytest
 from distillops.io import read_jsonl
 from distillops.rejection import rejection_sample
 from distillops.task import Task, Verdict
-from distillops.teacher import Price, Teacher, TeacherConfig, cached_prompt_tokens
+from distillops.teacher import Teacher, TeacherConfig, cached_prompt_tokens
 
 
 class FakeClient:
@@ -24,10 +24,7 @@ class FakeClient:
 
 
 def make_teacher(tmp_path, answers):
-    cfg = TeacherConfig(
-        base_url="x", model="m", cache_path=str(tmp_path / "c.sqlite"),
-        price=Price(input_cache_hit=0.02, input_cache_miss=1.0, output=4.0),
-    )
+    cfg = TeacherConfig(base_url="x", model="m", cache_path=str(tmp_path / "c.sqlite"))
     return Teacher(cfg, client=FakeClient(answers))
 
 
@@ -75,19 +72,17 @@ async def test_rejection_sampling_retries_and_resumes(tmp_path):
     assert teacher.client.calls == calls_before
 
 
-async def test_teacher_disk_cache_and_cost(tmp_path):
+async def test_teacher_disk_cache_and_usage(tmp_path):
     teacher = make_teacher(tmp_path, lambda m, c: "hello")
     a = await teacher.complete([{"role": "user", "content": "hi"}], sample_id=0)
     b = await teacher.complete([{"role": "user", "content": "hi"}], sample_id=0)
     c = await teacher.complete([{"role": "user", "content": "hi"}], sample_id=1)
     assert not a.cached and b.cached and not c.cached  # different sample_id -> new request
     assert teacher.client.calls == 2
-    # cost: 800 hit*0.02 + 200 miss*1 + 100 out*4 per 1M tokens, the same at any time of day
-    expected = (800 * 0.02 + 200 * 1.0 + 100 * 4.0) / 1e6
-    assert abs(a.cost - expected) < 1e-12 and b.cost == 0.0  # the local cache is free
-    summary = teacher.meter.summary()  # rounded for display; the meter keeps the exact sum
-    assert summary["served_from_local_cache"] == 1 and abs(teacher.meter.cost - 2 * expected) < 1e-12
-    assert summary["cost"] == round(2 * expected, 4)
+    summary = teacher.meter.summary()  # tokens of the requests sent; the local cache hit is counted apart
+    assert summary == {"calls": 3, "served_from_local_cache": 1, "sent_to_api": 2, "prompt_tokens": 2000,
+                       "api_cache_hit_tokens": 1600, "completion_tokens": 200, "avg_completion_tokens": 100.0}
+    assert not hasattr(a, "cost")
 
 
 async def test_stop_when_leaves_unfinished_examples_for_a_later_run(tmp_path):
@@ -95,7 +90,7 @@ async def test_stop_when_leaves_unfinished_examples_for_a_later_run(tmp_path):
     teacher.cfg.max_concurrency = 1  # examples run one at a time, so the stop point is deterministic
     calls = {"n": 0}
 
-    def stop_after_two():  # e.g. a budget or deadline was reached
+    def stop_after_two():  # e.g. a deadline was reached
         calls["n"] += 1
         return calls["n"] > 2
 
@@ -121,7 +116,7 @@ def test_shipped_teacher_configs_load(path):
 
 def test_teacher_config_defaults_are_provider_neutral():
     cfg = TeacherConfig(base_url="http://localhost:8000/v1", model="m")
-    assert cfg.api_key_env == "TEACHER_API_KEY" and cfg.price == Price()
+    assert cfg.api_key_env == "TEACHER_API_KEY" and not hasattr(cfg, "price")
 
 
 def test_teacher_command_requires_a_teacher_config():

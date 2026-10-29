@@ -87,3 +87,25 @@ class Task(ABC):
         from .evaluate import evaluate_task
 
         return evaluate_task(self, model, examples, out_dir, **gen_kwargs)
+
+
+def check_ids(task: Any, examples: Sequence[Any]) -> list[str]:
+    """The examples' ids, after checking each is a non-empty str and all are distinct. Ids are
+    compared as text with what earlier runs wrote (log.jsonl, --keep-ids, --exclude), so an id of
+    another type would never match, and a repeated id would make two examples one."""
+    ids: list[str] = []
+    first: dict[str, int] = {}
+    for i, ex in enumerate(examples):
+        eid = task.example_id(ex)
+        if not isinstance(eid, str) or not eid:
+            raise TypeError(f"{type(task).__name__}.example_id must return a non-empty str, but example {i} gave "
+                            f"{eid!r} ({type(eid).__name__}); e.g. return str(ex['id']).")
+        if eid != eid.strip() or "\n" in eid or "\r" in eid:  # id files hold one id per line
+            raise ValueError(f"{type(task).__name__}.example_id must not start or end with whitespace or contain "
+                             f"a line break (example {i}: {eid!r}).")
+        if eid in first:
+            raise ValueError(f"{type(task).__name__}.example_id is not unique: examples {first[eid]} and {i} "
+                             f"both have id {eid!r}.")
+        first[eid] = i
+        ids.append(eid)
+    return ids

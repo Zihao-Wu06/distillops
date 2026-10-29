@@ -416,7 +416,9 @@ def task_rows_and_reward(
     `score` (the same function used for evaluation, so RL optimises the reported metric).
     TRL passes dataset columns to reward functions as keyword arguments, so each row
     carries its example id and the reward looks the example up."""
-    by_id = {task.example_id(ex): ex for ex in examples}
+    from .task import check_ids
+
+    by_id = dict(zip(check_ids(task, examples), examples))
     # `render` turns chat messages into the final prompt string (e.g. with enable_thinking=False);
     # without it the prompt stays conversational and TRL applies the chat template.
     rows = [{"prompt": render(m) if render else m, "ex_id": task.example_id(ex)}
