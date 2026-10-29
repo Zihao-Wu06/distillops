@@ -102,6 +102,29 @@ SFT_FIELDS = {"output_dir": "output_dir", "num_train_epochs": "epochs", "learnin
               "logging_steps": "logging_steps", "save_strategy": "save_strategy", "seed": "seed"}
 
 
+def check_template_tokens(model: Any, tok: Any, row: dict, lora: bool) -> None:
+    """Special tokens the chat template writes (e.g. <|im_start|>, <|im_end|>, <think>) may be
+    untrained in a base model. LoRA does not train embeddings, so the model could never learn to
+    write them: it would not end its reply. Stop with the options instead of training such a model."""
+    from .chat import untrained_token_ids
+
+    prompt = chat_ids(tok, row["prompt"], add_generation_prompt=True)
+    full = chat_ids(tok, row["prompt"] + row["completion"])
+    written = full[len(prompt):] if full[:len(prompt)] == prompt else full
+    bad = untrained_token_ids(model, tok, full, written)
+    if not bad:
+        return
+    names = ", ".join(tok.convert_ids_to_tokens(bad))
+    if lora:
+        raise SystemExit(
+            f"The training rows use special tokens whose embeddings are untrained in {getattr(model, 'name_or_path', 'this model')} "
+            f"({names}); LoRA does not train embeddings, so the model would never learn to write them (and would "
+            "not stop at the end of its reply). Options: lora: false (full fine-tuning trains them; lr ~1e-5), "
+            "an already chat-trained (instruct) model, or a chat template whose tokens are trained "
+            "(chat_template: plain, if the training rows themselves contain no such tokens).")
+    print(f"note: {names} are untrained in this model; full fine-tuning will train them", flush=True)
+
+
 def _require_rows(stats: dict, path: str, max_length: int) -> None:
     if not stats["rows_in"]:
         raise SystemExit(f"{path} has no rows")
@@ -212,6 +235,7 @@ def train(cfg: SFTRunConfig) -> dict:
         model=cfg.model, args=args, train_dataset=Dataset.from_list(rows), eval_dataset=eval_ds,
         processing_class=tok, peft_config=peft_config,
     )
+    check_template_tokens(trainer.model, tok, rows[0], cfg.lora)
     from .preflight import check_disk, param_count
 
     need = sft_disk_bytes(param_count(cfg.model), lora=cfg.lora, args=args, n_rows=len(rows),
@@ -219,8 +243,14 @@ def train(cfg: SFTRunConfig) -> dict:
     check_disk(cfg.output_dir, need, "SFT outputs (checkpoints + final model)")
     result = trainer.train()
     trainer.save_model(cfg.output_dir)
-    if cfg.lora:  # merged copy so evaluation/serving can load a plain HF model
+    from .chat import save_stop_tokens
+
+    main = trainer.is_world_process_zero()  # one process writes files under a multi-process launch
+    if main:
+        save_stop_tokens(cfg.output_dir, tok)  # full fine-tuning: the model itself (an adapter folder is skipped)
+    if cfg.lora and main:  # merged copy so evaluation/serving can load a plain HF model
         merged = trainer.model.merge_and_unload()
         merged.save_pretrained(Path(cfg.output_dir) / "merged")
         tok.save_pretrained(Path(cfg.output_dir) / "merged")
+        save_stop_tokens(Path(cfg.output_dir) / "merged", tok)
     return {"length_filter": len_stats, "train_loss": result.training_loss}

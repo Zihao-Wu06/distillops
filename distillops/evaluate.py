@@ -32,7 +32,7 @@ def generate(
     import torch
     from transformers import AutoModelForCausalLM
 
-    from .chat import device, load_tokenizer
+    from .chat import device, load_tokenizer, stop_token_ids
 
     tok = load_tokenizer(model, chat_template)
     tok.padding_side = "left"  # decoder-only batching: pad on the left so generation starts aligned
@@ -40,6 +40,7 @@ def generate(
 
     dev = device()
     lm = AutoModelForCausalLM.from_pretrained(model, dtype=compute_dtype(), device_map=dev).eval()
+    stops = stop_token_ids(tok, lm.generation_config.eos_token_id)  # EOS and the template's end-of-turn token
     texts = [
         tok.apply_chat_template(m, tokenize=False, add_generation_prompt=True, **(chat_template_kwargs or {}))
         for m in message_lists
@@ -59,7 +60,8 @@ def generate(
         idx = order[a:b]
         enc = tok([texts[i] for i in idx], return_tensors="pt", padding=True, add_special_tokens=False).to(dev)
         with torch.no_grad():
-            gen = lm.generate(**enc, max_new_tokens=max_new_tokens, do_sample=False, pad_token_id=tok.pad_token_id)
+            gen = lm.generate(**enc, max_new_tokens=max_new_tokens, do_sample=False, pad_token_id=tok.pad_token_id,
+                              eos_token_id=stops)
         for i, row in zip(idx, gen[:, enc["input_ids"].shape[1] :]):
             out[i] = tok.decode(row, skip_special_tokens=True)
         print(f"generated {b}/{len(order)}", flush=True)

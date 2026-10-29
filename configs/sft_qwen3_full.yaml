@@ -1,0 +1,11 @@
+# Full fine-tuning SFT (all weights, fp32 master copy), e.g. for a base model whose chat-template
+# tokens are untrained: LoRA cannot learn those embeddings (distillops stops and says so).
+model: Qwen/Qwen3-1.7B-Base
+train_file: results/gsm8k/teacher_train_n0/accepted.jsonl
+output_dir: checkpoints/gsm8k_1.7b_base_teacher
+max_length: 1024
+epochs: 2
+lr: 1.0e-5          # full fine-tuning; LoRA uses ~1e-4
+batch_size: 8
+grad_accum: 4       # effective batch 32
+lora: false

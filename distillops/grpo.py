@@ -121,13 +121,16 @@ def estimate_pass_rates(
     from .chat import prepare_tokenizer
 
     tok = prepare_tokenizer(llm.get_tokenizer(), chat_template, model)
+    from .chat import end_of_turn_id
+
+    eot = end_of_turn_id(tok)  # stop where the template ends a reply, as GRPO and evaluation do
     prompts = [
         tok.apply_chat_template(task.student_messages(ex), tokenize=False, add_generation_prompt=True,
                                 **(chat_template_kwargs or {}))
         for ex in examples
     ]
     params = SamplingParams(n=n, temperature=temperature, max_tokens=max_tokens, seed=0,
-                            truncate_prompt_tokens=max_prompt_length)
+                            truncate_prompt_tokens=max_prompt_length, stop_token_ids=[eot] if eot is not None else None)
     outs = llm.generate(prompts, params)
     scores = [[float(task.score(ex, o.text)) for o in out.outputs] for ex, out in zip(examples, outs)]
     del llm  # free GPU memory for training
@@ -234,6 +237,8 @@ def grpo_disk_bytes(params: int, lora: bool, args: Any, validation: bool, bytes_
     per_ckpt = bytes_per_param + (0 if args.save_only_model else 8)
     every = args.save_steps if args.save_steps >= 1 else math.ceil(args.max_steps * args.save_steps)
     n_ckpt = args.save_total_limit or max(1, args.max_steps // max(int(every), 1))
+    if str(getattr(args.save_strategy, "value", args.save_strategy)) == "no":
+        n_ckpt = 0
     models = (2 if validation else 1) * bytes_per_param
     return params * (n_ckpt * per_ckpt + models)
 
@@ -299,9 +304,11 @@ def make_evaluator(task: Any, examples: Sequence[Any], max_new_tokens: int,
     def evaluate(model: Any, tok: Any) -> float:
         import torch
 
+        from .chat import stop_token_ids
         from .memory import adaptive_chunks, max_sequences
         from .precision import compute_dtype
 
+        stops = stop_token_ids(tok, getattr(getattr(model, "generation_config", None), "eos_token_id", None))
         texts = [render(task.student_messages(ex)) if render else
                  tok.apply_chat_template(task.student_messages(ex), tokenize=False, add_generation_prompt=True)
                  for ex in examples]
@@ -327,7 +334,7 @@ def make_evaluator(task: Any, examples: Sequence[Any], max_new_tokens: int,
             enc = tok([texts[i] for i in idx], return_tensors="pt", padding=True, add_special_tokens=False).to(device)
             with torch.no_grad(), torch.autocast(device.type, dtype=compute_dtype(), enabled=use_amp):
                 gen = model.generate(**enc, max_new_tokens=max_new_tokens, do_sample=False,
-                                     pad_token_id=tok.pad_token_id, use_cache=True)
+                                     pad_token_id=tok.pad_token_id, eos_token_id=stops, use_cache=True)
             for i, row in zip(idx, gen[:, enc["input_ids"].shape[1]:]):
                 outs[i] = tok.decode(row, skip_special_tokens=True)
 
@@ -462,7 +469,17 @@ def train(
     prec = train_settings(full_finetune=not cfg.lora)
     print("precision:", describe(), flush=True)
     batch, accum = fit_micro_batch(cfg)
+    from .chat import end_of_turn_id, load_tokenizer, save_stop_tokens, stop_token_ids
     from .trainargs import merge_extra
+
+    tok = load_tokenizer(cfg.model, cfg.chat_template)
+    tok.padding_side = "left"  # TRL's GRPO pads prompts on the left
+    stops = stop_token_ids(tok)
+    eot = end_of_turn_id(tok)
+    if eot is not None:  # TRL ends (and masks) completions at the tokenizer's EOS: make that the end of a turn
+        print(f"note: the chat template ends a reply with {tok.convert_ids_to_tokens(eot)}, not EOS "
+              f"{tok.eos_token}; generation stops at both", flush=True)
+        tok.eos_token = tok.convert_ids_to_tokens(eot)
 
     framework_args = dict(
         output_dir=cfg.output_dir,
@@ -496,6 +513,11 @@ def train(
         # fp32 master weights for full fine-tuning, low-precision compute (distillops/precision.py)
         model_init_kwargs={"dtype": prec["model_dtype"]},
         reward_weights=list(reward_weights) if reward_weights else None,
+        # rollouts stop at EOS or the end-of-turn token (vLLM SamplingParams / transformers GenerationConfig).
+        # transformers pads a row that stopped early; TRL masks after the first `tok.eos_token` (now the
+        # end-of-turn token), so pad with that token, or a reply ending at the old EOS would count its padding
+        generation_kwargs=({"stop_token_ids": stops} if cfg.use_vllm else
+                           {"eos_token_id": stops, **({"pad_token_id": eot} if eot is not None else {})}),
     )
     args = GRPOConfig(**merge_extra(framework_args, cfg.extra, GRPO_FIELDS, "GRPO"))
     guard = entropy_guard(cfg.entropy_floor_ratio, cfg.entropy_patience)
@@ -507,10 +529,6 @@ def train(
             lambda model: evaluator(model, holder["trainer"].processing_class),
             cfg.eval_every, cfg.eval_patience, lambda: holder["trainer"].save_model(cfg.output_dir))
         callbacks.append(selector)
-    from .chat import load_tokenizer
-
-    tok = load_tokenizer(cfg.model, cfg.chat_template)
-    tok.padding_side = "left"  # TRL's GRPO pads prompts on the left
     trainer = GRPOTrainer(
         model=cfg.model, reward_funcs=list(reward_funcs), args=args, processing_class=tok,
         train_dataset=Dataset.from_list(rows), peft_config=peft_config, callbacks=callbacks,
@@ -537,8 +555,11 @@ def train(
         print("note: no trainable weight matrix to compare; the weight-change check is skipped", flush=True)
     out = {"train_loss": result.training_loss, "rows": len(rows), "weight_change": change,
            "steps": result.global_step, "stopped_for_entropy_collapse_at": guard.stopped_at}
+    main = trainer.is_world_process_zero()  # one process writes files under a multi-process launch
     if selector is None:
         trainer.save_model(cfg.output_dir)
+        if main:
+            save_stop_tokens(cfg.output_dir, tok)
         return out
     # output_dir holds the best model; the last one goes to output_dir/last for reference
     trainer.save_model(str(Path(cfg.output_dir) / "last"))
@@ -553,6 +574,9 @@ def train(
     else:
         note = f"best validation score at step {selector.best_step}; saved in {cfg.output_dir}"
     print("validation:", note, flush=True)
+    for d in (cfg.output_dir, Path(cfg.output_dir) / "last"):
+        if main:
+            save_stop_tokens(d, tok)
     out.update({"validation_history": selector.history, "best_step": selector.best_step,
                 "best_validation_score": selector.best, "validation_note": note})
     Path(cfg.output_dir).mkdir(parents=True, exist_ok=True)

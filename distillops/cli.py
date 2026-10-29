@@ -269,7 +269,11 @@ def cmd_merge(a: argparse.Namespace) -> None:
     base = AutoModelForCausalLM.from_pretrained(a.base, dtype=compute_dtype())
     merged = PeftModel.from_pretrained(base, a.adapter).merge_and_unload()
     merged.save_pretrained(a.out)
-    AutoTokenizer.from_pretrained(a.adapter).save_pretrained(a.out)
+    tok = AutoTokenizer.from_pretrained(a.adapter)
+    tok.save_pretrained(a.out)
+    from .chat import save_stop_tokens
+
+    save_stop_tokens(a.out, tok)
     print(f"merged {a.adapter} into {a.base} -> {a.out}")
 
 

@@ -79,3 +79,95 @@ def device() -> str:
     import torch
 
     return "cuda" if torch.cuda.is_available() else "cpu"
+
+
+def end_of_turn_id(tok: Any) -> int | None:
+    """The token the chat template puts right after an assistant reply (e.g. <|im_end|>), if it is
+    a single token other than EOS. A model trained on such turns ends its reply with that token,
+    so generation must stop there too; base models often keep a different EOS (<|endoftext|>)."""
+    marker = "\x00distillops-end-of-turn\x00"
+    try:
+        text = tok.apply_chat_template([{"role": "user", "content": "q"}, {"role": "assistant", "content": marker}],
+                                       tokenize=False)
+    except Exception:  # a template that needs other roles or fields: leave stopping to EOS
+        return None
+    if marker not in text:
+        return None
+    tail = text.split(marker, 1)[1].strip()
+    if not tail:
+        return None
+    ids = tok(tail, add_special_tokens=False)["input_ids"]
+    if len(ids) < 1:
+        return None
+    first = ids[0]  # e.g. "<|im_end|>" (then a newline): the first token after the reply
+    if tok.convert_ids_to_tokens(first) not in tail or first == tok.eos_token_id:
+        return None
+    special = set(getattr(tok, "all_special_ids", [])) | set(getattr(tok, "added_tokens_decoder", {}) or {})
+    return first if first in special else None
+
+
+def stop_token_ids(tok: Any, model_eos: Any = None) -> list[int]:
+    """EOS, the template's end-of-turn token and any EOS ids the model's generation config lists."""
+    ids: list[int] = []
+    extra = model_eos if isinstance(model_eos, (list, tuple)) else [model_eos]
+    for i in [getattr(tok, "eos_token_id", None), end_of_turn_id(tok), *extra]:
+        if isinstance(i, int) and i not in ids:
+            ids.append(i)
+    return ids
+
+
+def save_stop_tokens(model_dir: str | Path, tok: Any) -> list[int]:
+    """Record the stop tokens in a saved model's generation_config.json, so transformers and vLLM
+    (which reads that file) stop where the model was trained to end its reply."""
+    from transformers import GenerationConfig
+
+    model_dir = Path(model_dir)
+    if not (model_dir / "config.json").exists():  # e.g. a LoRA adapter folder: nothing to generate with
+        return []
+    if (model_dir / "generation_config.json").exists():
+        gen = GenerationConfig.from_pretrained(model_dir)
+    else:  # derive bos / eos / pad from the model config, as transformers would
+        from transformers import AutoConfig
+
+        try:
+            gen = GenerationConfig.from_model_config(AutoConfig.from_pretrained(model_dir))
+        except (OSError, ValueError):  # a config transformers cannot read: start from defaults
+            gen = GenerationConfig()
+    ids = stop_token_ids(tok, gen.eos_token_id)
+    gen.eos_token_id = ids if len(ids) > 1 else ids[0]
+    if gen.pad_token_id is None and tok.pad_token_id is not None:
+        gen.pad_token_id = tok.pad_token_id
+    gen.save_pretrained(model_dir)
+    return ids
+
+
+def untrained_token_ids(model: Any, tok: Any, token_ids: Any, written_ids: Any = None) -> list[int]:
+    """Which special tokens the rows use have an untrained embedding: all zeros, or identical to
+    another special token's row (models initialise unused special tokens to one shared vector).
+    Input rows are checked for every token in `token_ids`; a separate (untied) output layer only for
+    `written_ids`, the tokens the model must write (default: all), since a token that only ever
+    appears in prompts never needs its output row. LoRA trains neither."""
+    import torch
+
+    special = sorted(set(getattr(tok, "all_special_ids", [])) | set(getattr(tok, "added_tokens_decoder", {}) or {}))
+    used = sorted({int(i) for i in token_ids} & set(special))
+    written = used if written_ids is None else sorted({int(i) for i in written_ids} & set(special))
+    if not used:
+        return []
+    bad: set[int] = set()
+    inp = model.get_input_embeddings().weight
+    checks = [(inp, used)]
+    out = model.get_output_embeddings()
+    if out is not None and out.weight.data_ptr() != inp.data_ptr():
+        checks.append((out.weight, written))
+    with torch.no_grad():
+        for w, ids in checks:
+            rows = w[[i for i in special if i < w.shape[0]]].float()
+            index = {i: k for k, i in enumerate(i for i in special if i < w.shape[0])}
+            for i in ids:
+                if i not in index:
+                    continue
+                r = rows[index[i]]
+                if not bool(r.abs().sum() > 0) or bool((rows == r).all(dim=1).sum() > 1):
+                    bad.add(i)
+    return sorted(bad)

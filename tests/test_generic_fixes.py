@@ -61,6 +61,7 @@ def test_pass_rate_filter_samples_like_grpo(monkeypatch):
             self.kw = kw
 
     monkeypatch.setitem(sys.modules, "vllm", types.SimpleNamespace(LLM=LLM, SamplingParams=SamplingParams))
+    monkeypatch.setattr("distillops.memory.require_free_memory", lambda *a: None)  # no real GPU check in a unit test
     from distillops.grpo import estimate_pass_rates, filter_by_signal
 
     task = types.SimpleNamespace(student_messages=lambda ex: [{"role": "user", "content": ex}],
@@ -450,11 +451,13 @@ def test_grpo_disk_estimate():
 
     from distillops.grpo import grpo_disk_bytes
 
-    a = SimpleNamespace(save_only_model=True, save_total_limit=1, max_steps=200, save_steps=100)
+    a = SimpleNamespace(save_only_model=True, save_total_limit=1, max_steps=200, save_steps=100, save_strategy="steps")
     p = 10**9
     assert grpo_disk_bytes(p, lora=False, args=a, validation=True) == (4 + 2 * 4) * p  # checkpoint, best, last
     assert grpo_disk_bytes(p, lora=True, args=a, validation=True, start_bytes=4 * p) == 4 * p  # fp32 start copy
     assert grpo_disk_bytes(p, lora=True, args=a, validation=False) == 0
+    a.save_strategy = "no"  # no periodic checkpoints: the best and the last model only
+    assert grpo_disk_bytes(p, lora=False, args=a, validation=True) == 2 * 4 * p
 
 
 def test_eval_folders_of_different_runs_do_not_collide():
