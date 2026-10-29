@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="430" viewBox="0 0 1200 430" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
-  <title>distillops: a Task class drives an API teacher whose answers are verified and retried; the verified rows train a small open model with SFT, then GRPO with the task's score as reward.</title>
+  <title>How distillops works: a Task class drives an API teacher whose answers are verified and retried; the verified rows train a small open model with SFT, then GRPO with the task's score as reward.</title>
   <defs>
     <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="11" markerHeight="11" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
       <path d="M0,0 L10,5 L0,10 z" fill="#475569"/>
@@ -18,7 +18,7 @@
   <text x="44" y="56" font-size="20" font-weight="700" fill="#9a3412">Teacher side (any API, text answers only)</text>
 
   <rect x="44" y="76" width="520" height="70" rx="10" fill="#ffffff" stroke="#fdba74"/>
-  <text x="304" y="104" font-size="16" font-weight="600" fill="#1f2937" text-anchor="middle">Task class (your code, ~45 lines)</text>
+  <text x="304" y="104" font-size="16" font-weight="600" fill="#1f2937" text-anchor="middle">Task class (your code)</text>
   <text x="304" y="126" font-size="13" fill="#4b5563" text-anchor="middle">data · teacher prompt · verify (is this answer right?) · score (0-1)</text>
 
   <rect x="44" y="176" width="220" height="70" rx="10" fill="#ffffff" stroke="#fdba74"/>
@@ -36,7 +36,7 @@
 
   <rect x="44" y="276" width="520" height="110" rx="10" fill="#ffffff" stroke="#fdba74"/>
   <text x="304" y="306" font-size="16" font-weight="600" fill="#1f2937" text-anchor="middle">Verified training rows</text>
-  <text x="304" y="330" font-size="13" fill="#4b5563" text-anchor="middle">GSM8K: 7,274 of 7,473 problems kept, for 3.79 CNY (~$0.53)</text>
+  <text x="304" y="330" font-size="13" fill="#4b5563" text-anchor="middle">accepted answers become training rows · every attempt and verdict logged</text>
   <text x="304" y="352" font-size="13" fill="#4b5563" text-anchor="middle">cached responses: a rerun never pays twice · no-teacher control rows</text>
   <line x1="454" y1="248" x2="454" y2="274" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
 
