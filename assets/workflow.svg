@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="430" viewBox="0 0 1200 430" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <title>distillops: a Task class drives an API teacher whose answers are verified and retried; the verified rows train a small open model with SFT, then GRPO with the task's score as reward.</title>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="11" markerHeight="11" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#475569"/>
+    </marker>
+    <marker id="arrow-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="11" markerHeight="11" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#16a34a"/>
+    </marker>
+    <marker id="arrow-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="11" markerHeight="11" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#2563eb"/>
+    </marker>
+  </defs>
+  <rect x="0" y="0" width="1200" height="430" rx="18" fill="#f8fafc"/>
+
+  <!-- teacher side -->
+  <rect x="24" y="24" width="560" height="382" rx="14" fill="#fff7ed" stroke="#fb923c" stroke-width="2"/>
+  <text x="44" y="56" font-size="20" font-weight="700" fill="#9a3412">Teacher side (any API, text answers only)</text>
+
+  <rect x="44" y="76" width="520" height="70" rx="10" fill="#ffffff" stroke="#fdba74"/>
+  <text x="304" y="104" font-size="16" font-weight="600" fill="#1f2937" text-anchor="middle">Task class (your code, ~45 lines)</text>
+  <text x="304" y="126" font-size="13" fill="#4b5563" text-anchor="middle">data · teacher prompt · verify (is this answer right?) · score (0-1)</text>
+
+  <rect x="44" y="176" width="220" height="70" rx="10" fill="#ffffff" stroke="#fdba74"/>
+  <text x="154" y="204" font-size="16" font-weight="600" fill="#1f2937" text-anchor="middle">Teacher API</text>
+  <text x="154" y="226" font-size="13" fill="#4b5563" text-anchor="middle">any OpenAI-compatible model</text>
+  <line x1="154" y1="148" x2="154" y2="174" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <rect x="344" y="176" width="220" height="70" rx="10" fill="#ffffff" stroke="#fdba74"/>
+  <text x="454" y="204" font-size="16" font-weight="600" fill="#1f2937" text-anchor="middle">Verify</text>
+  <text x="454" y="226" font-size="13" fill="#4b5563" text-anchor="middle">keep what passes</text>
+  <line x1="266" y1="198" x2="342" y2="198" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="304" y="190" font-size="12" fill="#4b5563" text-anchor="middle">answers</text>
+  <line x1="342" y1="226" x2="266" y2="226" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="304" y="263" font-size="12" fill="#4b5563" text-anchor="middle">retry (≤ 3 tries)</text>
+
+  <rect x="44" y="276" width="520" height="110" rx="10" fill="#ffffff" stroke="#fdba74"/>
+  <text x="304" y="306" font-size="16" font-weight="600" fill="#1f2937" text-anchor="middle">Verified training rows</text>
+  <text x="304" y="330" font-size="13" fill="#4b5563" text-anchor="middle">GSM8K: 7,274 of 7,473 problems kept, for 3.79 CNY (~$0.53)</text>
+  <text x="304" y="352" font-size="13" fill="#4b5563" text-anchor="middle">cached responses: a rerun never pays twice · no-teacher control rows</text>
+  <line x1="454" y1="248" x2="454" y2="274" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- student side -->
+  <rect x="660" y="24" width="516" height="382" rx="14" fill="#eff6ff" stroke="#60a5fa" stroke-width="2"/>
+  <text x="680" y="56" font-size="20" font-weight="700" fill="#1e40af">Student side (your GPU)</text>
+
+  <rect x="690" y="76" width="456" height="70" rx="10" fill="#ffffff" stroke="#93c5fd"/>
+  <text x="918" y="104" font-size="16" font-weight="600" fill="#1f2937" text-anchor="middle">Small open model you run yourself</text>
+  <text x="918" y="126" font-size="13" fill="#4b5563" text-anchor="middle">scored with the same Task.score · works with transformers and vLLM</text>
+
+  <rect x="690" y="176" width="456" height="70" rx="10" fill="#ffffff" stroke="#93c5fd"/>
+  <text x="918" y="204" font-size="16" font-weight="600" fill="#1f2937" text-anchor="middle">GRPO</text>
+  <text x="918" y="226" font-size="13" fill="#4b5563" text-anchor="middle">trains only on prompts whose samples disagree · entropy guard</text>
+  <line x1="918" y1="174" x2="918" y2="148" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <rect x="690" y="276" width="456" height="110" rx="10" fill="#ffffff" stroke="#93c5fd"/>
+  <text x="918" y="306" font-size="16" font-weight="600" fill="#1f2937" text-anchor="middle">SFT</text>
+  <text x="918" y="330" font-size="13" fill="#4b5563" text-anchor="middle">full fine-tuning or LoRA · loss on the answer only</text>
+  <text x="918" y="352" font-size="13" fill="#4b5563" text-anchor="middle">precision chosen and disk space checked for your hardware</text>
+  <line x1="918" y1="274" x2="918" y2="248" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- crossings -->
+  <line x1="566" y1="331" x2="688" y2="331" stroke="#16a34a" stroke-width="3" marker-end="url(#arrow-green)"/>
+  <text x="613" y="320" font-size="12" font-weight="600" fill="#15803d" text-anchor="middle">verified rows</text>
+  <line x1="566" y1="111" x2="688" y2="211" stroke="#2563eb" stroke-width="3" stroke-dasharray="7 5" marker-end="url(#arrow-blue)"/>
+  <text x="640" y="152" font-size="13" font-weight="600" fill="#1d4ed8" text-anchor="middle" transform="rotate(39.3 640 152)">score = reward</text>
+</svg>

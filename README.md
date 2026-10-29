@@ -6,6 +6,9 @@
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![python 3.11 | 3.12](https://img.shields.io/badge/python-3.11%20%7C%203.12-blue.svg)](pyproject.toml)
 
+<p align="center"><img src="assets/workflow.svg" width="900"
+  alt="Workflow: a Task class drives an API teacher; answers that pass verify (retried up to 3 times) become verified training rows, which train a small open model with SFT and then GRPO, using the task's score as reward"></p>
+
 Under $1 of API calls (3.79 CNY of DeepSeek answers) takes **Qwen3-1.7B-Base from 73.8% to 81.6%** on
 GSM8K, on par with Qwen's own post-trained Qwen3-1.7B (80.2%). Training on GSM8K's human-written
 solutions to the same problems scores 68.5%: the gain comes from the teacher's verified reasoning.
