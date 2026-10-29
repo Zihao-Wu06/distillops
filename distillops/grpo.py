@@ -85,9 +85,9 @@ def estimate_pass_rates(
     score them with the task. Returns per-example pass rates and summary statistics."""
     from vllm import LLM, SamplingParams
 
-    from .memory import wait_for_free_memory
+    from .memory import require_free_memory
 
-    wait_for_free_memory(gpu_memory_utilization + 0.05)  # the GPU may be shared with another job
+    require_free_memory(gpu_memory_utilization, "--filter-gpu-memory")
     from .precision import compute_dtype, dtype_name
 
     llm = LLM(model=model, dtype=dtype_name(compute_dtype()), gpu_memory_utilization=gpu_memory_utilization, seed=0)
@@ -374,9 +374,9 @@ def train(
     from trl import GRPOConfig, GRPOTrainer
 
     if cfg.use_vllm and cfg.vllm_mode == "colocate":
-        from .memory import wait_for_free_memory
+        from .memory import require_free_memory
 
-        wait_for_free_memory(cfg.vllm_gpu_memory_utilization + 0.15)  # vLLM share + room for training
+        require_free_memory(cfg.vllm_gpu_memory_utilization, "vllm_gpu_memory_utilization")
     if rows is None:
         with open(cfg.train_file, encoding="utf-8") as f:
             rows = [json.loads(l) for l in f if l.strip()]

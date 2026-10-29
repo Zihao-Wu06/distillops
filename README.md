@@ -72,7 +72,7 @@ and the GRPO reward, so reinforcement learning optimises exactly what you report
   recent LLM recommenders at ~1/1,500 of their serving size.
 
 ## Contents
-[Install](#install) · [Quick start](#quick-start) · [Add your own task](#add-your-own-task) ·
+[Install](#install) · [Hardware](#hardware) · [Quick start](#quick-start) · [Add your own task](#add-your-own-task) ·
 [Commands](#commands) · [Configuration](#configuration) · [Outputs](#outputs) ·
 [What the framework handles](#what-the-framework-handles) · [Safeguards](#safeguards) ·
 [Included examples and results](#included-examples-and-results) · [Related work](#related-work) · [Layout](#layout)
@@ -98,6 +98,30 @@ handles the version differences it knows about (warmup arguments, chat-template 
 **Teacher terms of use:** check that your teacher's terms allow training other models on its outputs;
 some providers' terms forbid training competing models.
 
+## Hardware
+Nothing is tuned to a particular GPU: memory settings are fractions of the card or are sized from
+the memory that is free when the run starts.
+
+| Step | Needs |
+|---|---|
+| `teacher`, `labels`, `cost` | no GPU (API calls and files) |
+| `sft`, `eval` | a CUDA GPU; without one they run on the CPU, which is practical only for small models |
+| `grpo` with vLLM (default), pass-rate filter | Linux and a CUDA GPU; `use_vllm: false` runs anywhere, more slowly |
+
+Rough GPU memory per billion student parameters, before activations:
+- **LoRA SFT:** ~2 GB (base weights in bf16/fp16; the adapter and its optimizer state are small).
+- **Full fine-tuning** (`lora: false`; GRPO's default): ~16 GB (fp32 weights, gradients and AdamW
+  state). GRPO with vLLM also reserves `vllm_gpu_memory_utilization` of the card for rollouts.
+- **Evaluation:** ~2 GB for the weights; the rest goes to the KV cache.
+
+What adapts and what does not:
+- Evaluation and GRPO size their batches from free memory and the model's config, and shrink them
+  if a batch would not fit. SFT uses `batch_size` as given: if it runs out of memory, lower
+  `batch_size` and raise `grad_accum` (same effective batch).
+- `doctor` reports the GPU, precision and free memory; training refuses to start if the disk cannot
+  hold the run, and GRPO stops at once if vLLM's share of the GPU is not free, naming the setting to lower.
+- One GPU per run; multi-GPU launches (`accelerate`, `torchrun`) are not tested.
+
 ## Quick start
 The whole workflow on the included GSM8K example. For your own task, set `T` to its import path; the
 commands stay the same. The teacher can be any OpenAI-compatible API: copy
@@ -111,10 +135,16 @@ TEACHER=configs/my_teacher.yaml
 python -m distillops eval    --task $T --model Qwen/Qwen3-0.6B --no-think           # baseline: 62.4%
 python -m distillops teacher --task $T --teacher $TEACHER --n 100                   # smoke test on 100 problems
 python -m distillops teacher --task $T --teacher $TEACHER                           # full train split
-python -m distillops labels  --task $T                                             # control: answers only
 python -m distillops sft     configs/sft_qwen3.yaml \
          --train_file results/gsm8k/teacher_train_n0/accepted.jsonl --output_dir checkpoints/gsm8k_0.6b_teacher
 python -m distillops eval    --task $T --model checkpoints/gsm8k_0.6b_teacher/merged # 62.5%
+
+# no-teacher control: the same SFT on the dataset's human-written solutions
+python -m distillops labels  --task $T --task-arg label_reasoning=human --out data/sft/gsm8k/human.jsonl
+python -m distillops sft     configs/sft_qwen3.yaml \
+         --train_file data/sft/gsm8k/human.jsonl --output_dir checkpoints/gsm8k_0.6b_human
+python -m distillops eval    --task $T --model checkpoints/gsm8k_0.6b_human/merged   # 49.0%
+# (without --task-arg, labels writes answer-only rows: 13.6%)
 
 # GRPO (Linux + vLLM): measure the learning signal first, then train on the useful prompts
 python -m distillops grpo configs/grpo_gsm8k_qwen3_0.6b.yaml --task $T --filter-samples 8 --filter-only
@@ -333,7 +363,7 @@ Each one comes from a real failure.
 | Windows spills VRAM to system RAM instead of raising OOM (10-100x slower) | batch sizes from free memory and the model's KV-cache size; halve automatically when a batch peaks above 85% |
 | Loss-time logits grow with completion length (long math solutions ran out of memory, short titles did not) | GRPO micro-batch sized from completion length, vocabulary and memory, with accumulation raised to keep the effective batch |
 | Checkpoints with optimizer state fill the disk at the final save | weights-only checkpoints, one kept; refuse to start if the disk cannot hold the run |
-| Two jobs start vLLM on one GPU | wait for free memory before vLLM reserves its share |
+| vLLM starts after the model has loaded and only then finds its reserved share of the GPU unavailable | free memory checked first; the error names the setting to lower |
 | GRPO on prompts that are always right or always wrong learns nothing | pass-rate filter with plain-language advice; `--epochs` sizes the run to the kept prompts |
 | GRPO entropy collapse: the policy memorises one answer per prompt | stop when entropy stays below 10% of the run's own starting value (relative, so no task-specific threshold) |
 | Training reward rises while held-out quality falls | validation-based checkpoint selection; `output_dir` keeps the best model, or the start model if nothing beats it |
@@ -342,7 +372,6 @@ Each one comes from a real failure.
 ## Included examples and results
 The two example tasks exist to show the workflow and what it achieves; their code lives in `tasks/`
 and is not needed to use the framework on your own task.
-
 
 ### Math: GSM8K (Qwen3-0.6B student, all 1,319 test problems)
 | Student | Accuracy |

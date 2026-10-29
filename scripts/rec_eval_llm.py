@@ -44,9 +44,10 @@ def main() -> None:
         rows = random.Random(0).sample(rows, args.n)
 
     tok = AutoTokenizer.from_pretrained(args.model)
+    from distillops.chat import device
     from distillops.precision import compute_dtype
 
-    model = AutoModelForCausalLM.from_pretrained(args.model, dtype=compute_dtype(), device_map="cuda")
+    model = AutoModelForCausalLM.from_pretrained(args.model, dtype=compute_dtype(), device_map=device())
     model.eval()
     titles = catalog.unique_titles()
     check_boundary(tok, titles)

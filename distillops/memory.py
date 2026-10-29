@@ -158,20 +158,17 @@ def _empty_cache() -> None:
         pass
 
 
-def wait_for_free_memory(fraction: float, poll_s: float = 30.0, timeout_s: float = 6 * 3600,
-                         log: Callable[[str], None] = print) -> None:
-    """Block until `fraction` of the GPU's memory is free (e.g. another job sharing the card
-    finishes). vLLM reserves a fixed fraction up front and fails if it is not available."""
-    import time
-
+def require_free_memory(fraction: float, setting: str) -> None:
+    """Fail fast, with a clear message, if less than `fraction` of the GPU's memory is free.
+    vLLM reserves that fraction of the whole card up front and otherwise fails later, after the
+    model has loaded, with a less clear error. `setting` names the option that sets `fraction`."""
     import torch
 
     if not torch.cuda.is_available():
         return
-    start = time.time()
-    while True:
-        free, total = torch.cuda.mem_get_info()
-        if free >= fraction * total or time.time() - start > timeout_s:
-            return
-        log(f"waiting for GPU memory: {free / total:.0%} free, need {fraction:.0%}")
-        time.sleep(poll_s)
+    free, total = torch.cuda.mem_get_info()
+    if free < fraction * total:
+        raise RuntimeError(
+            f"vLLM needs {fraction:.0%} of GPU memory ({fraction * total / 2**30:.1f} GiB, set by {setting}), "
+            f"but only {free / total:.0%} ({free / 2**30:.1f} GiB) is free. Another process is using the GPU "
+            f"(see nvidia-smi): free it, or lower {setting}.")

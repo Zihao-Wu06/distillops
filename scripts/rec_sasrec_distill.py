@@ -71,9 +71,10 @@ def cmd_topk(a, cat: str) -> None:
     if not todo:
         return
     tok = AutoTokenizer.from_pretrained(a.model)
+    from distillops.chat import device
     from distillops.precision import compute_dtype
 
-    model = AutoModelForCausalLM.from_pretrained(a.model, dtype=compute_dtype(), device_map="cuda").eval()
+    model = AutoModelForCausalLM.from_pretrained(a.model, dtype=compute_dtype(), device_map=device()).eval()
     titles = catalog.unique_titles()
     check_boundary(tok, titles)
     trie = build_trie(titles, tok)

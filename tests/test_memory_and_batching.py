@@ -58,3 +58,18 @@ def test_adaptive_chunks_retries_out_of_memory_with_half_the_batch():
     adaptive_chunks(5, 8, run, log=lambda m: None, peak_fraction=lambda: 0.1)
     assert calls[:3] == [(0, 5), (0, 4), (0, 2)]
     assert [c for c in calls if c[1] - c[0] <= 2] == [(0, 2), (2, 4), (4, 5)]
+
+
+def test_require_free_memory_fails_fast_with_the_setting_name(monkeypatch):
+    import pytest
+    import torch
+
+    from distillops.memory import require_free_memory
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda: (20 * 2**30, 80 * 2**30))  # 25% free
+    require_free_memory(0.25, "vllm_gpu_memory_utilization")  # exactly enough: no error
+    with pytest.raises(RuntimeError, match="lower --filter-gpu-memory"):
+        require_free_memory(0.4, "--filter-gpu-memory")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    require_free_memory(0.9, "x")  # no CUDA GPU: nothing to check
