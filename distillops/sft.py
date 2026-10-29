@@ -88,8 +88,52 @@ def show_masked_example(tokenizer, row: dict) -> str:
     carry loss. Run this before every new training setup."""
     prompt_text = tokenizer.apply_chat_template(row["prompt"], tokenize=False, add_generation_prompt=True)
     full_text = tokenizer.apply_chat_template(row["prompt"] + row["completion"], tokenize=False)
-    assert full_text.startswith(prompt_text), "chat template: prompt is not a prefix of prompt+completion"
+    if not full_text.startswith(prompt_text):  # e.g. a template that rewrites earlier turns
+        return ("WARNING: with this chat template the prompt is not a prefix of prompt+completion, so the "
+                "completion-only loss mask cannot be shown exactly (TRL warns about the same rows).\n"
+                f"[PROMPT]{prompt_text}[/PROMPT]\n[PROMPT+COMPLETION]{full_text}[/PROMPT+COMPLETION]")
     return f"[NO LOSS]{prompt_text}[/NO LOSS]\n[LOSS]{full_text[len(prompt_text):]}[/LOSS]"
+
+
+# trainer arguments that have their own config field (see distillops/trainargs.py)
+SFT_FIELDS = {"output_dir": "output_dir", "num_train_epochs": "epochs", "learning_rate": "lr",
+              "per_device_train_batch_size": "batch_size", "gradient_accumulation_steps": "grad_accum",
+              "max_length": "max_length",
+              "logging_steps": "logging_steps", "save_strategy": "save_strategy", "seed": "seed"}
+
+
+def _require_rows(stats: dict, path: str, max_length: int) -> None:
+    if not stats["rows_in"]:
+        raise SystemExit(f"{path} has no rows")
+    if not stats["rows_kept"]:
+        raise SystemExit(f"no rows left in {path}: all {stats['rows_in']} are longer than max_length={max_length} "
+                         f"tokens (longest: {stats['len_max']}). Raise max_length.")
+
+
+def sft_disk_bytes(params: int, lora: bool, args: Any, n_rows: int, merged_bytes_per_param: int = 2) -> int:
+    """Disk an SFT run writes: its checkpoints plus the final model (LoRA: adapter + merged copy).
+    Full fine-tuning saves fp32 weights (4 B/param) and, unless save_only_model, Adam's two fp32
+    moments (8 B/param more); LoRA checkpoints hold only the small adapter."""
+    import math
+
+    if not params:
+        return 0
+    strategy = str(getattr(args.save_strategy, "value", args.save_strategy))
+    if strategy == "no":
+        n_ckpt = 0
+    elif args.save_total_limit:
+        n_ckpt = args.save_total_limit
+    elif strategy == "epoch":
+        n_ckpt = math.ceil(args.num_train_epochs)
+    else:  # "steps": total optimizer steps / save_steps (save_steps < 1 is a fraction of the run)
+        steps = math.ceil(n_rows / (args.per_device_train_batch_size * args.gradient_accumulation_steps))
+        steps = math.ceil(steps * args.num_train_epochs) if args.max_steps <= 0 else args.max_steps
+        every = args.save_steps if args.save_steps >= 1 else max(1, math.ceil(steps * args.save_steps))
+        n_ckpt = max(1, steps // int(every))
+    if lora:
+        return params * merged_bytes_per_param  # the merged model; adapters are a small fraction of it
+    per_ckpt = 4 + (0 if args.save_only_model else 8)
+    return params * (n_ckpt * per_ckpt + 4)
 
 
 def _warmup(ratio: float) -> dict:
@@ -101,7 +145,6 @@ def _warmup(ratio: float) -> dict:
 
 
 def train(cfg: SFTRunConfig) -> dict:
-    import torch
     from datasets import Dataset
     from trl import SFTConfig, SFTTrainer
 
@@ -110,6 +153,7 @@ def train(cfg: SFTRunConfig) -> dict:
     tok = load_tokenizer(cfg.model, cfg.chat_template)
     rows, len_stats = length_filter(_load_rows(cfg.train_file), tok, cfg.max_length)
     print("length filter:", len_stats)
+    _require_rows(len_stats, cfg.train_file, cfg.max_length)
     if len_stats["prompt_boundary_mismatch"]:
         print(f"note: in {len_stats['prompt_boundary_mismatch']} rows the completion's first token merges with "
               "the end of the prompt (often a completion starting with whitespace); the loss mask is off by one "
@@ -117,7 +161,8 @@ def train(cfg: SFTRunConfig) -> dict:
     print(show_masked_example(tok, rows[0])[:2000])
     eval_ds = None
     if cfg.eval_file:
-        eval_rows, _ = length_filter(_load_rows(cfg.eval_file), tok, cfg.max_length)
+        eval_rows, eval_stats = length_filter(_load_rows(cfg.eval_file), tok, cfg.max_length)
+        _require_rows(eval_stats, cfg.eval_file, cfg.max_length)
         eval_ds = Dataset.from_list(eval_rows)
 
     peft_config = None
@@ -131,12 +176,11 @@ def train(cfg: SFTRunConfig) -> dict:
 
     from .precision import describe, train_settings
 
+    from .trainargs import merge_extra
+
     prec = train_settings(full_finetune=not cfg.lora)
-    defaults = {"gradient_checkpointing": True, "use_cpu": prec["use_cpu"]}
-    defaults.update(cfg.extra)  # config `extra` may override defaults such as gradient_checkpointing
     print("precision:", describe(), flush=True)
-    args = SFTConfig(
-        **defaults,
+    framework_args = dict(
         output_dir=cfg.output_dir,
         num_train_epochs=cfg.epochs,
         learning_rate=cfg.lr,
@@ -146,22 +190,33 @@ def train(cfg: SFTRunConfig) -> dict:
         lr_scheduler_type="cosine",
         max_length=cfg.max_length,
         completion_only_loss=True,
+        gradient_checkpointing=True,
         bf16=prec["bf16"],
         fp16=prec["fp16"],
+        use_cpu=prec["use_cpu"],
         logging_steps=cfg.logging_steps,
         save_strategy=cfg.save_strategy,
+        # checkpoints with optimizer state are ~3x the weights; the final model is what is used
+        save_only_model=True,
+        save_total_limit=1,
         eval_strategy="epoch" if eval_ds is not None else "no",
         seed=cfg.seed,
         report_to="none",
         model_init_kwargs={"dtype": prec["model_dtype"]},  # fp32 if full fine-tuning
     )
+    # the warmup argument _warmup sets (warmup_ratio, or warmup_steps on transformers 5) comes from the
+    # warmup_ratio field; on 4.x, warmup_steps (a step count) stays free to set through `extra`
+    fields = {**SFT_FIELDS, **{k: "warmup_ratio" for k in _warmup(cfg.warmup_ratio)}}
+    args = SFTConfig(**merge_extra(framework_args, cfg.extra, fields, "SFT"))
     trainer = SFTTrainer(
         model=cfg.model, args=args, train_dataset=Dataset.from_list(rows), eval_dataset=eval_ds,
         processing_class=tok, peft_config=peft_config,
     )
-    from .preflight import check_disk, model_bytes
+    from .preflight import check_disk, param_count
 
-    check_disk(cfg.output_dir, model_bytes(cfg.model) * 2, "SFT outputs (checkpoints + merged model)")
+    need = sft_disk_bytes(param_count(cfg.model), lora=cfg.lora, args=args, n_rows=len(rows),
+                          merged_bytes_per_param=prec["model_dtype"].itemsize)
+    check_disk(cfg.output_dir, need, "SFT outputs (checkpoints + final model)")
     result = trainer.train()
     trainer.save_model(cfg.output_dir)
     if cfg.lora:  # merged copy so evaluation/serving can load a plain HF model

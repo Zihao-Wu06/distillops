@@ -38,8 +38,10 @@ class TeacherConfig:
     base_url: str
     model: str
     api_key_env: str = "TEACHER_API_KEY"  # name of the environment variable holding the key
-    temperature: float = 1.0
-    max_tokens: int = 1024
+    temperature: float | None = 1.0  # None = not sent (models that only accept their default)
+    max_tokens: int | None = 1024  # None = not sent (the provider's default limit)
+    # the request field for max_tokens: OpenAI's reasoning models take "max_completion_tokens"
+    max_tokens_param: str = "max_tokens"
     max_concurrency: int = 32
     timeout_s: float = 300.0
     max_retries: int = 6
@@ -47,11 +49,35 @@ class TeacherConfig:
     price: Price = field(default_factory=Price)
     cache_path: str = "cache/teacher.sqlite"
 
+    def __post_init__(self) -> None:
+        if self.max_tokens_param not in TOKEN_LIMIT_PARAMS:
+            raise ValueError(f"max_tokens_param must be one of {TOKEN_LIMIT_PARAMS} (got {self.max_tokens_param!r}); "
+                             "other provider-specific fields go in extra_body")
+
     @classmethod
     def from_yaml(cls, path: str | Path) -> "TeacherConfig":
         raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
         raw["price"] = Price(**(raw.get("price") or {}))
         return cls(**raw)
+
+    def request_params(self, **overrides: Any) -> dict[str, Any]:
+        """Sampling fields sent with every request; fields set to None are left out."""
+        temperature = overrides.get("temperature", self.temperature)
+        max_tokens = overrides.get("max_tokens", self.max_tokens)
+        params: dict[str, Any] = {}
+        if temperature is not None:
+            params["temperature"] = temperature
+        if max_tokens is not None:
+            params[self.max_tokens_param] = max_tokens
+        return params
+
+    def identity(self) -> dict[str, Any]:
+        """What determines the teacher's answers (used to keep separate runs apart)."""
+        return {"base_url": self.base_url, "model": self.model, "params": self.request_params(),
+                "extra_body": self.extra_body}
+
+
+TOKEN_LIMIT_PARAMS = ("max_tokens", "max_completion_tokens")
 
 
 def cached_prompt_tokens(usage: Any) -> int:
@@ -149,25 +175,30 @@ class Teacher:
             client = AsyncOpenAI(base_url=cfg.base_url, api_key=key, timeout=cfg.timeout_s, max_retries=0)
         self.client = client
 
-    def _key(self, messages: list[dict], sample_id: int, params: dict) -> str:
-        blob = json.dumps(
-            {"model": self.cfg.model, "messages": messages, "sample_id": sample_id, "params": params},
-            sort_keys=True,
-            ensure_ascii=False,
-        )
+    def _key(self, messages: list[dict], sample_id: int, params: dict, with_endpoint: bool = True) -> str:
+        """Cache key. It includes the endpoint, so two providers serving the same model name never
+        share answers; `with_endpoint=False` gives the key of caches written before that."""
+        fields = {"model": self.cfg.model, "messages": messages, "sample_id": sample_id, "params": params}
+        if with_endpoint:
+            fields["base_url"] = self.cfg.base_url
+        blob = json.dumps(fields, sort_keys=True, ensure_ascii=False)
         return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
-    async def complete(self, messages: list[dict], sample_id: int = 0, **overrides: Any) -> Completion:
-        params = {
-            "temperature": overrides.get("temperature", self.cfg.temperature),
-            "max_tokens": overrides.get("max_tokens", self.cfg.max_tokens),
-        }
-        extra = {**self.cfg.extra_body, **overrides.get("extra_body", {})}
-        key = self._key(messages, sample_id, {**params, "extra_body": extra})
-
+    def _cached(self, messages: list[dict], sample_id: int, params: dict) -> tuple[str, dict | None]:
+        key = self._key(messages, sample_id, params)
         hit = self._cache.get(key)
+        if hit is None:  # an entry from before the endpoint was recorded (it has no "base_url")
+            legacy = self._cache.get(self._key(messages, sample_id, params, with_endpoint=False))
+            hit = legacy if legacy is not None and "base_url" not in legacy else None
+        return key, hit
+
+    async def complete(self, messages: list[dict], sample_id: int = 0, **overrides: Any) -> Completion:
+        params = self.cfg.request_params(**overrides)
+        extra = {**self.cfg.extra_body, **overrides.get("extra_body", {})}
+        key, hit = self._cached(messages, sample_id, {**params, "extra_body": extra})
         if hit is not None:
-            c = Completion(**{**hit, "cached": True, "cost": 0.0})
+            fields = {k: v for k, v in hit.items() if k in Completion.__dataclass_fields__}
+            c = Completion(**{**fields, "cached": True, "cost": 0.0})
             self.meter.add(c)
             return c
 
@@ -181,7 +212,7 @@ class Teacher:
         hit_tokens = cached_prompt_tokens(usage)
         c = Completion(
             text=msg.content or "",
-            reasoning=getattr(msg, "reasoning_content", None),
+            reasoning=getattr(msg, "reasoning_content", None) or getattr(msg, "reasoning", None),
             prompt_tokens=prompt,
             completion_tokens=completion,
             cache_hit_tokens=hit_tokens,
@@ -189,6 +220,7 @@ class Teacher:
             cost=_cost(self.cfg, prompt, hit_tokens, completion),
         )
         record = {k: v for k, v in c.__dict__.items() if k not in ("cached", "cost")}
+        record.update(model=self.cfg.model, base_url=self.cfg.base_url)  # lets `cost` count per teacher
         self._cache.put(key, record)
         self.meter.add(c)
         return c

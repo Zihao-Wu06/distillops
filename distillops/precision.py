@@ -21,8 +21,14 @@ def _torch():
 
 
 def bf16_supported() -> bool:
+    """Native bf16: NVIDIA compute capability 8.0+ (Ampere and newer), or ROCm. torch's own
+    `is_bf16_supported()` also returns True where bf16 is only emulated (e.g. T4, V100), which is slow."""
     torch = _torch()
-    return bool(torch.cuda.is_available() and torch.cuda.is_bf16_supported())
+    if not torch.cuda.is_available():
+        return False
+    if getattr(torch.version, "hip", None):
+        return bool(torch.cuda.is_bf16_supported())
+    return torch.cuda.get_device_capability()[0] >= 8
 
 
 def compute_dtype():

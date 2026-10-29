@@ -113,5 +113,30 @@ async def rejection_sample(
     return stats
 
 
+def check_run_settings(out_dir: str | Path, settings: dict[str, Any]) -> None:
+    """Record what produced `out_dir` (run.json) and refuse to resume it with different settings:
+    examples already in its log are skipped, so another teacher or task setting would silently
+    mix two runs into one dataset."""
+    import json
+
+    out = Path(out_dir)
+    path = out / "run.json"
+    settings = json.loads(json.dumps(settings, sort_keys=True, default=str))
+    log = out / "log.jsonl"
+    has_results = log.exists() and log.stat().st_size > 0
+    if path.exists() and has_results:  # a run that produced nothing (e.g. a config typo) may be redone
+        before = json.loads(path.read_text(encoding="utf-8"))
+        changed = sorted(k for k in set(before) | set(settings) if before.get(k) != settings.get(k))
+        if changed:
+            raise SystemExit(
+                f"{out} holds a run with different settings ({', '.join(changed)}); resuming would mix the two.\n"
+                f"  before: { {k: before.get(k) for k in changed} }\n  now:    { {k: settings.get(k) for k in changed} }\n"
+                "Pass --out <new folder> for a separate run.")
+        return
+    if has_results and not path.exists():
+        print(f"note: {out} has no run.json (made by an older version); assuming it used these settings", flush=True)
+    write_json(path, settings)
+
+
 def run_sync(*args: Any, **kwargs: Any) -> dict[str, Any]:
     return asyncio.run(rejection_sample(*args, **kwargs))

@@ -77,6 +77,11 @@ class Task(ABC):
         "is the teacher's reasoning worth more than the plain labels?"."""
         raise NotImplementedError(f"{type(self).__name__} does not implement gold_sft_example")
 
+    def extra_metrics(self, examples: Sequence[Any], completions: Sequence[str], scores: Sequence[float]) -> dict[str, Any]:
+        """Optional metrics over the whole evaluation set, reported next to the mean `score`
+        (e.g. macro-F1, BLEU, or anything that is not an average of per-example scores)."""
+        return {}
+
     def evaluate(self, model: str, examples: Sequence[Any], out_dir: str | Path, **gen_kwargs: Any) -> dict[str, Any]:
         """Generate with the student and score. Override for custom decoding."""
         from .evaluate import evaluate_task

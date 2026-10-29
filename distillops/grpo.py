@@ -2,9 +2,9 @@
 
 What makes GRPO work in practice:
 1. Start from the SFT checkpoint (cold start); RL from a raw small model rarely learns.
-2. Keep only prompts with 0 < pass-rate < 1 under the SFT model: if all G samples
-   are right (or all wrong) the group-normalised advantage is 0 and the prompt
-   teaches nothing. `filter_by_pass_rate` does this.
+2. Keep only prompts whose G samples differ in score under the SFT model: if all
+   scores are equal (all right, all wrong, or the same partial credit) the
+   group-normalised advantage is 0 and the prompt teaches nothing. `has_signal`.
 3. Verifiable rewards supplied by the task (`Task.score`, the evaluation metric).
 4. Log sample completions; watch reward, length, entropy and KL for hacking/collapse.
 """
@@ -39,6 +39,9 @@ class GRPORunConfig:
     vllm_mode: str = "colocate"
     vllm_gpu_memory_utilization: float = 0.3
     lora: bool = False
+    lora_r: int = 32
+    lora_alpha: int = 64
+    lora_dropout: float = 0.0
     seed: int = 42
     logging_steps: int = 5
     save_steps: int = 100
@@ -65,9 +68,27 @@ class GRPORunConfig:
         return cls(**raw)
 
 
-def filter_by_pass_rate(rows: Sequence[dict], pass_rates: Sequence[float], lo: float = 0.0, hi: float = 1.0) -> list[dict]:
-    """Keep prompts whose pass-rate p (fraction of G samples rewarded) satisfies lo < p < hi."""
-    return [r for r, p in zip(rows, pass_rates) if lo < p < hi]
+def has_signal(scores: Sequence[float], tol: float = 1e-9) -> bool:
+    """True if a prompt's sampled completions differ in score. GRPO's advantage is each score minus
+    the group mean, so a group whose scores are all equal (all 0, all 1, or the same partial
+    credit) teaches nothing. Works for binary and partial-credit rewards alike."""
+    return bool(scores) and max(scores) - min(scores) > tol
+
+
+def filter_by_signal(rows: Sequence[Any], scores: Sequence[Sequence[float]]) -> list[Any]:
+    """Keep the rows whose sampled scores differ (`has_signal`)."""
+    return [r for r, s in zip(rows, scores) if has_signal(s)]
+
+
+def signal_stats(scores: Sequence[Sequence[float]]) -> dict[str, Any]:
+    """How many prompts carry a learning signal, and why the others do not."""
+    flat = [x for s in scores for x in s]
+    same = [s[0] for s in scores if s and not has_signal(s)]
+    return {"examples": len(scores), "samples_per_example": len(scores[0]) if scores else 0,
+            "mean_score": round(sum(flat) / len(flat), 4) if flat else 0.0,
+            "mixed": sum(has_signal(s) for s in scores),
+            "all_wrong": sum(v <= 0 for v in same), "all_right": sum(v >= 1 for v in same),
+            "all_same_partial": sum(0 < v < 1 for v in same)}
 
 
 def estimate_pass_rates(
@@ -80,9 +101,11 @@ def estimate_pass_rates(
     chat_template_kwargs: dict[str, Any] | None = None,
     gpu_memory_utilization: float = 0.85,
     chat_template: str | None = None,
-) -> tuple[list[float], dict[str, Any]]:
-    """Sample `n` completions per prompt with vLLM (the same sampling GRPO will use) and
-    score them with the task. Returns per-example pass rates and summary statistics."""
+    max_prompt_length: int | None = None,
+) -> tuple[list[list[float]], dict[str, Any]]:
+    """Sample `n` completions per prompt with vLLM, the way GRPO will (same temperature, completion
+    limit, prompt truncation and context length), and score them with the task. Returns each
+    example's scores and summary statistics (`signal_stats`)."""
     from vllm import LLM, SamplingParams
 
     from .memory import require_free_memory
@@ -90,7 +113,11 @@ def estimate_pass_rates(
     require_free_memory(gpu_memory_utilization, "--filter-gpu-memory")
     from .precision import compute_dtype, dtype_name
 
-    llm = LLM(model=model, dtype=dtype_name(compute_dtype()), gpu_memory_utilization=gpu_memory_utilization, seed=0)
+    # Like TRL's GRPO: context = prompt + completion limit (otherwise vLLM reserves the model's full
+    # context, which may not fit), and over-long prompts keep their last max_prompt_length tokens.
+    max_model_len = max_prompt_length + max_tokens if max_prompt_length else None
+    llm = LLM(model=model, dtype=dtype_name(compute_dtype()), gpu_memory_utilization=gpu_memory_utilization,
+              max_model_len=max_model_len, seed=0)
     from .chat import prepare_tokenizer
 
     tok = prepare_tokenizer(llm.get_tokenizer(), chat_template, model)
@@ -99,26 +126,26 @@ def estimate_pass_rates(
                                 **(chat_template_kwargs or {}))
         for ex in examples
     ]
-    outs = llm.generate(prompts, SamplingParams(n=n, temperature=temperature, max_tokens=max_tokens, seed=0))
-    rates = [sum(task.score(ex, o.text) for o in out.outputs) / n for ex, out in zip(examples, outs)]
-    hist = {"all_wrong": sum(r == 0 for r in rates), "mixed": sum(0 < r < 1 for r in rates),
-            "all_right": sum(r == 1 for r in rates)}
-    stats = {"examples": len(rates), "samples_per_example": n, "mean_pass_rate": round(sum(rates) / max(len(rates), 1), 4),
-             **hist}
+    params = SamplingParams(n=n, temperature=temperature, max_tokens=max_tokens, seed=0,
+                            truncate_prompt_tokens=max_prompt_length)
+    outs = llm.generate(prompts, params)
+    scores = [[float(task.score(ex, o.text)) for o in out.outputs] for ex, out in zip(examples, outs)]
     del llm  # free GPU memory for training
-    return rates, stats
+    return scores, signal_stats(scores)
 
 
 def diagnose_pass_rates(stats: dict[str, Any], warn_below: float = 0.10) -> list[str]:
-    """Plain-language advice from the pass-rate distribution (any task)."""
+    """Plain-language advice from the score distribution (any task, binary or partial-credit score)."""
     n = max(stats["examples"], 1)
     mixed, wrong, right = stats["mixed"] / n, stats["all_wrong"] / n, stats["all_right"] / n
-    notes = [f"{mixed:.1%} of prompts give a learning signal (some samples right, some wrong); "
-             f"{wrong:.1%} are always wrong, {right:.1%} always right."]
+    partial = stats.get("all_same_partial", 0) / n
+    notes = [f"{mixed:.1%} of prompts give a learning signal (their samples differ in score); "
+             f"{wrong:.1%} always score 0, {right:.1%} always score 1"
+             + (f", {partial:.1%} get the same partial score every time." if partial else ".")]
     if mixed < warn_below:
-        notes.append("The reward is sparse for this model: GRPO can only learn from the mixed prompts. "
+        notes.append("The reward is sparse for this model: GRPO can only learn from prompts whose samples differ. "
                      "Options: more samples per prompt (--filter-samples, num_generations), more candidate prompts, "
-                     "a stronger SFT start, or a denser Task.score that gives partial credit.")
+                     "a stronger SFT start, or a Task.score that separates better from worse answers.")
     if right > 0.5:
         notes.append("Most prompts are already solved: GRPO has little left to teach; consider harder prompts.")
     return notes
@@ -147,20 +174,29 @@ def fit_micro_batch(cfg: "GRPORunConfig", total_bytes: int | None = None, vocab:
             import torch
             from transformers import AutoConfig
 
-            from .preflight import model_bytes
+            from .memory import model_dims
+            from .preflight import param_count
 
             if not torch.cuda.is_available():
                 return cfg.batch_size, cfg.grad_accum
             total_bytes = total_bytes or torch.cuda.get_device_properties(0).total_memory
-            c = AutoConfig.from_pretrained(cfg.model)
-            vocab = vocab or getattr(getattr(c, "text_config", c), "vocab_size")
-            params = model_bytes(cfg.model) / 2  # weight files are 16-bit -> parameter count
+            vocab = vocab or model_dims(AutoConfig.from_pretrained(cfg.model))["vocab"]
+            params = param_count(cfg.model)
+            if not params:
+                return cfg.batch_size, cfg.grad_accum
             # fp32 weights + grads + Adam (16 B/param) for full fine-tuning; a LoRA base needs ~2 B/param
             train_state_bytes = train_state_bytes or int(params * (2 if cfg.lora else 16))
-        except Exception:
+        except Exception as e:  # unknown architecture, no network, ...: keep the configured batch
+            print(f"note: could not size the GRPO micro-batch ({e}); using batch_size={cfg.batch_size}", flush=True)
             return cfg.batch_size, cfg.grad_accum
     vllm = cfg.vllm_gpu_memory_utilization if (cfg.use_vllm and cfg.vllm_mode == "colocate") else 0.0
-    budget = 0.5 * (total_bytes * (1 - vllm) - train_state_bytes)  # half for logits, half for activations
+    free_for_training = total_bytes * (1 - vllm) - train_state_bytes
+    if free_for_training <= 0:
+        print(f"WARNING: the model's training state (~{train_state_bytes / 2**30:.1f} GB"
+              + (", full fine-tuning at 16 B/param" if not cfg.lora else "") + ") does not fit next to vLLM's "
+              f"share ({vllm:.0%}) on this {total_bytes / 2**30:.0f} GB GPU. Options: lora: true, a smaller model, "
+              "or a lower vllm_gpu_memory_utilization.", flush=True)
+    budget = 0.5 * free_for_training  # half for logits, half for activations
     per_completion = cfg.max_completion_length * vocab * 8
     cap = max(1, int(budget // per_completion))
     batch = max(d for d in range(1, total + 1) if total % d == 0 and d <= max(cap, 1))
@@ -169,6 +205,37 @@ def fit_micro_batch(cfg: "GRPORunConfig", total_bytes: int | None = None, vocab:
         print(f"micro-batch {cfg.batch_size} -> {batch} completions (x{total // batch} accumulation, same "
               f"{total} per step): {cfg.max_completion_length}-token completions x {vocab} vocab", flush=True)
     return batch, total // batch
+
+
+# trainer arguments that have their own config field (see distillops/trainargs.py)
+GRPO_FIELDS = {"output_dir": "output_dir", "learning_rate": "lr", "per_device_train_batch_size": "batch_size",
+               "gradient_accumulation_steps": "grad_accum", "num_generations": "num_generations",
+               "max_prompt_length": "max_prompt_length", "max_completion_length": "max_completion_length",
+               "temperature": "temperature", "beta": "beta", "epsilon": "epsilon", "loss_type": "loss_type",
+               "max_steps": "max_steps", "use_vllm": "use_vllm", "vllm_mode": "vllm_mode",
+               "vllm_gpu_memory_utilization": "vllm_gpu_memory_utilization", "logging_steps": "logging_steps",
+               "save_steps": "save_steps", "seed": "seed"}
+
+
+def grpo_disk_bytes(params: int, lora: bool, args: Any, validation: bool, bytes_per_param: int = 4,
+                    start_bytes: int = 0) -> int:
+    """Disk a GRPO run writes. Full fine-tuning: each checkpoint and saved model holds the weights in
+    the training dtype (fp32), plus Adam's moments (8 B/param) unless save_only_model; there are
+    save_total_limit checkpoints, the final or best model, and output_dir/last with validation.
+    LoRA saves adapters (small), but output_dir may receive a copy of the start model when no
+    trained step beats it (`start_bytes`: its weight files' size; 0 = assume 16-bit)."""
+    if not params:
+        return 0
+    start_copy = start_bytes or params * 2  # the start model, copied when nothing beats it
+    if lora:
+        return start_copy if validation else 0
+    import math
+
+    per_ckpt = bytes_per_param + (0 if args.save_only_model else 8)
+    every = args.save_steps if args.save_steps >= 1 else math.ceil(args.max_steps * args.save_steps)
+    n_ckpt = args.save_total_limit or max(1, args.max_steps // max(int(every), 1))
+    models = (2 if validation else 1) * bytes_per_param
+    return params * (n_ckpt * per_ckpt + models)
 
 
 def entropy_guard(floor_ratio: float, patience: int):
@@ -322,8 +389,10 @@ def validation_selector(evaluate: Callable[[Any], float], every: int, patience: 
 
 
 def _snapshot(model: Any, n: int = 8) -> dict[str, Any]:
-    """CPU copies of a few trainable weight matrices, to measure how much training moved them."""
-    named = [(k, p) for k, p in model.named_parameters() if p.requires_grad and p.dim() == 2]
+    """CPU copies of a few trainable weight matrices, to measure how much training moved them.
+    Matrices that start at zero (LoRA's B) are skipped: a change relative to zero is meaningless."""
+    named = [(k, p) for k, p in model.named_parameters()
+             if p.requires_grad and p.dim() == 2 and bool(p.detach().abs().sum() > 0)]
     step = max(1, len(named) // n)
     return {k: p.detach().float().cpu().clone() for k, p in named[::step][:n]}
 
@@ -369,7 +438,6 @@ def train(
 ) -> dict:
     import shutil
 
-    import torch
     from datasets import Dataset
     from trl import GRPOConfig, GRPOTrainer
 
@@ -384,14 +452,17 @@ def train(
     if cfg.lora:
         from peft import LoraConfig
 
-        peft_config = LoraConfig(r=32, lora_alpha=64, target_modules="all-linear", task_type="CAUSAL_LM")
+        peft_config = LoraConfig(r=cfg.lora_r, lora_alpha=cfg.lora_alpha, lora_dropout=cfg.lora_dropout,
+                                 target_modules="all-linear", task_type="CAUSAL_LM")
 
     from .precision import describe, train_settings
 
     prec = train_settings(full_finetune=not cfg.lora)
     print("precision:", describe(), flush=True)
     batch, accum = fit_micro_batch(cfg)
-    args = GRPOConfig(
+    from .trainargs import merge_extra
+
+    framework_args = dict(
         output_dir=cfg.output_dir,
         learning_rate=cfg.lr,
         per_device_train_batch_size=batch,
@@ -413,17 +484,18 @@ def train(
         logging_steps=cfg.logging_steps,
         save_steps=cfg.save_steps,
         log_completions=True,  # inspect real outputs: the first defence against reward hacking
-        # Full fine-tuning checkpoints with optimizer state are ~5x the model size (a 1.7B run
-        # filled a 50GB disk); RL runs are short, so keep weights only and one checkpoint.
-        **{"save_only_model": True, "save_total_limit": 1, "use_cpu": prec["use_cpu"],
-           **{k: v for k, v in cfg.extra.items() if k in ("save_only_model", "save_total_limit", "use_cpu")}},
+        # Full fine-tuning checkpoints with optimizer state are several times the model size; RL
+        # runs are short, so keep weights only and one checkpoint.
+        save_only_model=True,
+        save_total_limit=1,
+        use_cpu=prec["use_cpu"],
         seed=cfg.seed,
         report_to="none",
         # fp32 master weights for full fine-tuning, low-precision compute (distillops/precision.py)
         model_init_kwargs={"dtype": prec["model_dtype"]},
         reward_weights=list(reward_weights) if reward_weights else None,
-        **{k: v for k, v in cfg.extra.items() if k not in ("save_only_model", "save_total_limit", "use_cpu")},
     )
+    args = GRPOConfig(**merge_extra(framework_args, cfg.extra, GRPO_FIELDS, "GRPO"))
     guard = entropy_guard(cfg.entropy_floor_ratio, cfg.entropy_patience)
     callbacks = [guard]
     selector = None
@@ -442,22 +514,25 @@ def train(
         train_dataset=Dataset.from_list(rows), peft_config=peft_config, callbacks=callbacks,
     )
     holder["trainer"] = trainer
-    from .preflight import check_disk, min_expected_change, model_bytes
+    from .preflight import check_disk, min_expected_change, param_count, stored_bytes
 
-    # weights-only checkpoints in the training dtype: (save_total_limit + final) copies
-    per_copy = model_bytes(cfg.model) * (2 if prec["model_dtype"] == torch.float32 else 1)
-    # periodic checkpoints + the final/best model (+ the last model when validation picks the best)
-    copies = (args.save_total_limit or 1) + 1 + (1 if selector else 0)
-    check_disk(cfg.output_dir, per_copy * copies, "GRPO checkpoints")
+    need = grpo_disk_bytes(param_count(cfg.model), lora=cfg.lora, args=args, validation=selector is not None,
+                           bytes_per_param=prec["model_dtype"].itemsize, start_bytes=stored_bytes(cfg.model))
+    check_disk(cfg.output_dir, need, "GRPO checkpoints and outputs")
     before = _snapshot(trainer.model)
     result = trainer.train()
-    change = _relative_change(before, trainer.model)
-    rms = sum(v.std().item() for v in before.values()) / max(len(before), 1)
-    floor = min_expected_change(cfg.lr, result.global_step, rms)
-    print(f"weight change (relative, sampled tensors): {change:.2e} (expected at least {floor:.1e})", flush=True)
-    if change < floor:
-        print("WARNING: the weights barely changed. Check precision (low-precision master weights round "
-              "small updates away), the learning rate, and the share of prompts with a learning signal.", flush=True)
+    change = None
+    if before:
+        change = _relative_change(before, trainer.model)
+        rms = sum(v.std().item() for v in before.values()) / len(before)
+        floor = min_expected_change(cfg.lr, result.global_step, rms)
+        print(f"weight change (relative, sampled tensors): {change:.2e} (expected at least {floor:.1e})", flush=True)
+        if change < floor:
+            print("WARNING: the weights barely changed. Check precision (low-precision master weights round "
+                  "small updates away), the learning rate, and the share of prompts with a learning signal.",
+                  flush=True)
+    else:
+        print("note: no trainable weight matrix to compare; the weight-change check is skipped", flush=True)
     out = {"train_loss": result.training_loss, "rows": len(rows), "weight_change": change,
            "steps": result.global_step, "stopped_for_entropy_collapse_at": guard.stopped_at}
     if selector is None:

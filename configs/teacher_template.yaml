@@ -5,6 +5,7 @@ model: your-teacher-model                # the provider's model name
 api_key_env: TEACHER_API_KEY             # environment variable that holds the API key (never put keys here)
 temperature: 0.7                         # > 0 so retries in rejection sampling give different answers
 max_tokens: 1024                         # per call
+max_tokens_param: max_tokens             # OpenAI reasoning models: max_completion_tokens (and temperature: null)
 max_concurrency: 32                      # parallel requests; raise it if the provider allows
 timeout_s: 300                           # per request
 max_retries: 6                           # with exponential backoff; 400/401/403/404 are not retried

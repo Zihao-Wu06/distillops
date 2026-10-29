@@ -1,10 +1,13 @@
-from distillops.grpo import filter_by_pass_rate
+from distillops.grpo import filter_by_signal, signal_stats
 
 
-def test_pass_rate_filter_drops_all_right_and_all_wrong():
-    rows = [{"id": i} for i in range(4)]
-    kept = filter_by_pass_rate(rows, [0.0, 0.25, 1.0, 0.75])
-    assert [r["id"] for r in kept] == [1, 3]
+def test_signal_filter_keeps_prompts_whose_samples_differ():
+    rows = [{"id": i} for i in range(6)]
+    scores = [[0, 0, 0], [0, 1, 0], [1, 1, 1], [1, 1, 0], [0.5, 0.5, 0.5], [0.2, 0.7, 0.7]]
+    assert [r["id"] for r in filter_by_signal(rows, scores)] == [1, 3, 5]  # equal partial credit: no signal
+    st = signal_stats(scores)
+    assert (st["mixed"], st["all_wrong"], st["all_right"], st["all_same_partial"]) == (3, 1, 1, 1)
+    assert st["samples_per_example"] == 3
 
 
 def test_epochs_to_steps_and_sparse_reward_advice():

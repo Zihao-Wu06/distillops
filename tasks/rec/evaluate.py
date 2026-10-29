@@ -23,7 +23,7 @@ def evaluate_rec(
     model: str,
     examples: Sequence[Any],
     out_dir: str | Path,
-    enable_thinking: bool = True,
+    chat_template_kwargs: dict[str, Any] | None = None,
     beams: int = 20,
     batch_size: int = 0,
     chat_template: str | None = None,
@@ -35,6 +35,7 @@ def evaluate_rec(
     from distillops.chat import device, load_tokenizer
     from distillops.precision import compute_dtype
 
+    enable_thinking = bool((chat_template_kwargs or {}).get("enable_thinking", True))  # --no-think
     tok = load_tokenizer(model, chat_template)
     lm = AutoModelForCausalLM.from_pretrained(model, dtype=compute_dtype(), device_map=device()).eval()
     titles = load_catalog(task.category).unique_titles()

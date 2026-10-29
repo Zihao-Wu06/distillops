@@ -21,11 +21,13 @@ def generate(
     message_lists: Sequence[list[dict[str, str]]],
     max_new_tokens: int = 512,
     batch_size: int = 0,
-    enable_thinking: bool = True,
+    chat_template_kwargs: dict[str, Any] | None = None,
     chat_template: str | None = None,
 ) -> list[str]:
     """Greedy completions for a list of chat prompts (order preserved).
     batch_size 0 = auto from free GPU memory and the model config (any GPU).
+    chat_template_kwargs: options passed to the chat template (e.g. {"enable_thinking": False});
+    templates ignore options they do not use.
     chat_template: see distillops/chat.py (None = the model's own, or a plain one if it has none)."""
     import torch
     from transformers import AutoModelForCausalLM
@@ -39,7 +41,7 @@ def generate(
     dev = device()
     lm = AutoModelForCausalLM.from_pretrained(model, dtype=compute_dtype(), device_map=dev).eval()
     texts = [
-        tok.apply_chat_template(m, tokenize=False, add_generation_prompt=True, enable_thinking=enable_thinking)
+        tok.apply_chat_template(m, tokenize=False, add_generation_prompt=True, **(chat_template_kwargs or {}))
         for m in message_lists
     ]
     # Longest prompts first: similar lengths share a batch (less padding), and an
@@ -88,6 +90,14 @@ def evaluate_task(
         "sec_per_example": round((time.time() - t0) / max(n, 1), 3),
         **{k: v for k, v in gen_kwargs.items() if isinstance(v, (int, float, str, bool))},
     }
+    if gen_kwargs.get("chat_template_kwargs"):
+        metrics["chat_template_kwargs"] = gen_kwargs["chat_template_kwargs"]
+    extra_metrics = getattr(task, "extra_metrics", None)  # dataset-level metrics (F1, BLEU, ...), optional
+    extra = extra_metrics(examples, completions, scores) if callable(extra_metrics) else {}
+    clash = sorted(set(extra) & set(metrics))
+    if clash:
+        raise ValueError(f"extra_metrics returned keys the framework already reports: {clash}")
+    metrics.update(extra)
     out = Path(out_dir)
     write_json(out / "metrics.json", metrics)
     write_jsonl(out / "predictions.jsonl", (

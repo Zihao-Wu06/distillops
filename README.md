@@ -206,7 +206,7 @@ class TicketTriage(Task):
 ```
 
 ```bash
-python scripts/check_task.py --task my_tasks.triage:TicketTriage      # data, prompts, masked SFT row: check before paying
+python scripts/check_task.py --task my_tasks.triage:TicketTriage --model Qwen/Qwen3-0.6B  # data, prompts, masked row
 python -m distillops teacher --task my_tasks.triage:TicketTriage --teacher configs/my_teacher.yaml --n 50
 # then labels / sft / eval / grpo as in Quick start
 ```
@@ -224,6 +224,7 @@ The methods, with the included GSM8K example for comparison:
 | `student_messages(ex)` | the student's prompt | question + answer-format instruction |
 | `score(ex, completion)` | metric **and** GRPO reward, in [0, 1] | 1 if the final number is right |
 | `gold_sft_example(ex)` *(optional)* | label-only control row | `ANSWER: n`, or the human solution |
+| `extra_metrics(examples, completions, scores)` *(optional)* | metrics over the whole set, next to the mean `score` (e.g. macro-F1, BLEU) | - |
 | `evaluate(...)` *(optional)* | custom decoding | - (recommendation overrides it with constrained beam search) |
 
 Constructor arguments can be passed on the command line, e.g. `--task-arg max_words=200`.
@@ -241,16 +242,18 @@ arguments, repeatable), `--split`, `--n` (random subset, 0 = all) and `--seed`.
 | Command | What it does | Main flags |
 |---|---|---|
 | `doctor` | environment report and platform warnings | - |
-| `teacher` | teacher outputs -> `verify` -> accepted SFT rows, with retries | `--teacher` (config, required), `--max-attempts` (3), `--out` |
+| `teacher` | teacher outputs -> `verify` -> accepted SFT rows, with retries; a rerun resumes, and refuses a folder made with another teacher or task settings | `--teacher` (config, required), `--max-attempts` (3), `--out` |
 | `labels` | label-only SFT rows from `gold_sft_example` (the no-teacher control) | `--out` |
 | `sft` | supervised fine-tuning from a YAML config | `--train_file`, `--output_dir`, `--model`, `--epochs`, `--chat-template` (override the config) |
-| `eval` | generate with a student and score with `Task.score` | `--model`, `--max-new-tokens` (512), `--batch` (0 = auto), `--no-think`, `--chat-template`, `--tag`, `--out` |
-| `grpo` | GRPO with `Task.score` as the reward | `--model`, `--filter-samples N`, `--filter-only`, `--filter-gpu-memory` (0.4), `--keep-ids`, `--exclude`, `--epochs`, `--max-steps`, `--eval-every`, `--eval-examples`, `--chat-template`, `--output_dir` |
+| `eval` | generate with a student and score with `Task.score` | `--model`, `--max-new-tokens` (512), `--batch` (0 = auto), `--template-arg KEY=VALUE`, `--no-think` (= `enable_thinking=false`), `--chat-template`, `--tag`, `--out` |
+| `grpo` | GRPO with `Task.score` as the reward | `--model`, `--filter-samples N`, `--filter-only`, `--filter-gpu-memory` (0.4), `--keep-ids`, `--exclude`, `--epochs`, `--max-steps`, `--eval-every`, `--eval-examples`, `--chat-template`, `--template-arg`, `--output_dir` |
 | `merge` | merge a LoRA adapter into its base model | `--base`, `--adapter`, `--out` |
 | `cost` | teacher spend from the local response cache | `--teacher` (required) |
 
-`grpo` details: `--filter-samples 8 --filter-only` samples 8 completions per prompt with vLLM, prints
-how many prompts give a learning signal, and writes `pass_rate_kept.txt`; `--keep-ids` then trains on
+`grpo` details: `--filter-samples 8 --filter-only` samples 8 completions per prompt with vLLM (same
+temperature, length limits and prompt truncation as GRPO), keeps the prompts whose samples differ in
+score (the only ones GRPO learns from, with binary or partial-credit scores), prints why the others
+were dropped, and writes `pass_rate_kept.txt`; `--keep-ids` then trains on
 those prompts in a fresh process. `--exclude <jsonl>` skips prompts whose `meta.id` appears in a file
 (e.g. the SFT data). `--epochs E` sets the number of steps so each prompt is seen E times.
 
@@ -263,13 +266,14 @@ something itself (micro-batch, precision, validation source), it prints what it 
 |---|---|---|
 | `base_url`, `model` | required | any OpenAI-compatible endpoint (hosted API, vLLM, SGLang, ...) and model name |
 | `api_key_env` | `TEACHER_API_KEY` | environment variable holding the key (keys never go in config files) |
-| `temperature` | 1.0 | > 0 so retries in rejection sampling give different answers |
-| `max_tokens` | 1024 | per call |
+| `temperature` | 1.0 | > 0 so retries in rejection sampling give different answers; `null` = not sent (models that only accept their default) |
+| `max_tokens` | 1024 | per call; `null` = not sent |
+| `max_tokens_param` | `max_tokens` | request field for `max_tokens`; OpenAI's reasoning models need `max_completion_tokens` |
 | `max_concurrency` | 32 | parallel requests; raise it if your provider allows |
 | `timeout_s`, `max_retries` | 300, 6 | per request; retries back off exponentially (not on 400/401/403/404) |
 | `extra_body` | `{}` | provider-specific request options, passed through unchanged |
 | `price` | 0 | `input_cache_hit`, `input_cache_miss`, `output` per 1M tokens, in any currency; only for the cost meter. Prompt-cache hits are read from either `prompt_cache_hit_tokens` or `prompt_tokens_details.cached_tokens` |
-| `cache_path` | `cache/teacher.sqlite` | response cache: identical requests are never paid twice |
+| `cache_path` | `cache/teacher.sqlite` | response cache: identical requests to the same endpoint are never paid twice; teachers can share the file (`cost` counts each separately) |
 
 ### Student model
 Any causal language model can be the student: set `model` in the SFT or GRPO config, or pass
@@ -281,8 +285,9 @@ results used it.
   so the model learns to stop; a notice says so. To choose another, set `chat_template` in the config
   or pass `--chat-template`: `plain`, a Jinja file, or a Jinja string. The template is saved with the
   trained model, so later commands use it without the option.
-- **Template options** (`--no-think`, `chat_template_kwargs`) are passed to the template; templates
-  that do not use them ignore them.
+- **Template options** (`--template-arg KEY=VALUE`, `chat_template_kwargs` in the GRPO config;
+  `--no-think` is `enable_thinking=false`) are passed to the template; templates that do not use
+  them ignore them.
 - **Architectures.** Memory and disk estimates read layer, head and vocabulary sizes under each
   family's own config names (Llama/Qwen, GPT-2, Falcon, ChatGLM, multimodal configs, ...). For a
   model with no attention heads (e.g. a state-space model), generation starts at batch 8 and adapts.
@@ -301,9 +306,11 @@ results used it.
 | `lora`, `lora_r`, `lora_alpha`, `lora_dropout` | true, 32, 64, 0.05 | LoRA on all linear layers; `lora: false` = full fine-tuning (fp32 master weights) |
 | `seed`, `logging_steps`, `save_strategy` | 42, 10, `epoch` | |
 | `chat_template` | none | none = the model's own (plain if it has none); `plain`, a Jinja file or string ([Student model](#student-model)) |
-| `extra` | `{}` | any other TRL `SFTConfig` argument; gradient checkpointing is on unless `extra: {gradient_checkpointing: false}` |
+| `extra` | `{}` | any TRL `SFTConfig` argument, including ones the framework sets (`report_to`, `lr_scheduler_type`, `gradient_checkpointing`, ...; overrides are printed); arguments with a field above are set through that field |
 
-With LoRA, a merged copy is saved to `output_dir/merged` for evaluation and serving.
+With LoRA, a merged copy is saved to `output_dir/merged` for evaluation and serving. Checkpoints hold
+weights only and one is kept (`extra: {save_only_model: false, save_total_limit: null}` keeps
+optimizer state and every checkpoint); disk space for what will be written is checked before training.
 
 ### GRPO (`configs/grpo_gsm8k_qwen3_0.6b.yaml`)
 | Field | Default | Meaning |
@@ -318,7 +325,7 @@ With LoRA, a merged copy is saved to `output_dir/merged` for evaluation and serv
 | `batch_size`, `grad_accum` | 8, 4 | completions per device step and accumulation; the micro-batch shrinks automatically if long completions would not fit, keeping the product |
 | `max_steps` | 500 | or set by `--epochs` |
 | `use_vllm`, `vllm_mode`, `vllm_gpu_memory_utilization` | true, `colocate`, 0.3 | rollouts with vLLM on the training GPU |
-| `lora` | false | true = LoRA (low-precision base) |
+| `lora`, `lora_r`, `lora_alpha`, `lora_dropout` | false, 32, 64, 0.0 | true = LoRA on all linear layers (low-precision base); LoRA usually needs a higher `lr` (~1e-5 to 1e-4) |
 | `chat_template` | none | as for SFT; a model trained with distillops already carries its template |
 | `chat_template_kwargs` | `{}` | e.g. `{enable_thinking: false}`; prompts are rendered by the framework, so this works with any TRL version |
 | `eval_every` | 25 | validation check every N steps (0 = off) |
@@ -326,13 +333,13 @@ With LoRA, a merged copy is saved to `output_dir/merged` for evaluation and serv
 | `eval_patience` | 0 | stop after N checks without improvement (0 = never stop early) |
 | `entropy_floor_ratio`, `entropy_patience` | 0.1, 2 | stop when entropy stays below 10% of its starting value for 2 logs (0 = off) |
 | `seed`, `logging_steps`, `save_steps` | 42, 5, 100 | |
-| `extra` | `{}` | any other TRL `GRPOConfig` argument; checkpoints default to weights only, one kept (`save_only_model`, `save_total_limit`) |
+| `extra` | `{}` | any TRL `GRPOConfig` argument, as for SFT (e.g. `epsilon_high`, `report_to`); checkpoints default to weights only, one kept (`save_only_model`, `save_total_limit`) |
 
 ## Outputs
 | Command | Writes |
 |---|---|
-| `teacher` | `results/<task>/teacher_<split>_n<n>/`: `accepted.jsonl` (SFT rows), `log.jsonl` (every attempt and verdict; reruns resume from it), `stats.json` (yield, rejection reasons, tokens, cost) |
-| `labels` | `data/sft/<task>/labels_<split>_n<n>.jsonl` |
+| `teacher` | `results/<task>/teacher_<split>_n<n>[_<task args>]/`: `run.json` (teacher and task settings), `accepted.jsonl` (SFT rows), `log.jsonl` (every attempt and verdict; reruns resume from it), `stats.json` (yield, rejection reasons, tokens, cost) |
+| `labels` | `data/sft/<task>/labels_<split>_n<n>[_<task args>].jsonl` |
 | `sft` | `output_dir/` (adapter), `output_dir/merged/` (merged model), `sft_summary.json` |
 | `eval` | `results/<task>/eval/<tag>/metrics.json` and `predictions.jsonl` (every completion and its score) |
 | `grpo --filter-only` | `output_dir/pass_rate_filter.json` (statistics and advice), `output_dir/pass_rate_kept.txt` |
@@ -359,12 +366,13 @@ Each one comes from a real failure.
 | Silent failure | Guard in the framework |
 |---|---|
 | bf16 weights round lr-1e-6 updates away: training curves rise but the model does not change | fp32 master weights for full fine-tuning; after training, the relative weight change is checked against a floor derived from lr and steps |
-| Hard-coded bf16 breaks on GPUs without bf16 | `precision.compute_dtype()`: bf16, else fp16, else fp32, used everywhere |
+| Hard-coded bf16 breaks on GPUs without bf16, and torch reports bf16 as supported where it is only emulated (T4, V100: slow) | `precision.compute_dtype()`: bf16 only where native (compute capability 8.0+ or ROCm), else fp16, else fp32, used everywhere |
 | Windows spills VRAM to system RAM instead of raising OOM (10-100x slower) | batch sizes from free memory and the model's KV-cache size; halve automatically when a batch peaks above 85% |
 | Loss-time logits grow with completion length (long math solutions ran out of memory, short titles did not) | GRPO micro-batch sized from completion length, vocabulary and memory, with accumulation raised to keep the effective batch |
 | Checkpoints with optimizer state fill the disk at the final save | weights-only checkpoints, one kept; refuse to start if the disk cannot hold the run |
 | vLLM starts after the model has loaded and only then finds its reserved share of the GPU unavailable | free memory checked first; the error names the setting to lower |
-| GRPO on prompts that are always right or always wrong learns nothing | pass-rate filter with plain-language advice; `--epochs` sizes the run to the kept prompts |
+| GRPO on prompts whose samples all score the same (always right, always wrong, or the same partial credit) learns nothing | pass-rate filter keeps prompts whose samples differ, with plain-language advice; `--epochs` sizes the run to the kept prompts |
+| Rerunning `teacher` with another teacher or task setting into the same folder mixes two runs (finished examples are skipped) | each run folder records its settings in `run.json`, a mismatch stops the run; task arguments are part of default paths |
 | GRPO entropy collapse: the policy memorises one answer per prompt | stop when entropy stays below 10% of the run's own starting value (relative, so no task-specific threshold) |
 | Training reward rises while held-out quality falls | validation-based checkpoint selection; `output_dir` keeps the best model, or the start model if nothing beats it |
 | Code that only fits one model family: gpt2 names its layer count `n_layer`, base models have no chat template, and without CUDA transformers trains on Apple's MPS, where gpt2's attention dropout fails | sizes read under each architecture's config names; a plain chat template saved with the model; CPU training when there is no CUDA GPU |
