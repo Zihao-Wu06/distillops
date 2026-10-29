@@ -1,4 +1,4 @@
-# distillops — distil an API LLM into a small model, for any task with a checkable answer
+# distillops — distil an API LLM into a small model, for any task with a verifiable answer
 
 distillops turns a strong API model (the *teacher*) into a small open model you can run yourself,
 for **any task where a program can tell a good answer from a bad one**. You describe the task once,
