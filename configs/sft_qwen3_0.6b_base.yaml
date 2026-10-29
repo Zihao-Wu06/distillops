@@ -1,0 +1,14 @@
+# Try-it route (README): Qwen3-0.6B-Base on all teacher answers, full fine-tuning (a base model's
+# chat-template tokens are untrained, so LoRA cannot learn them). Fits a 24 GB GPU: measured peak
+# 14 GB allocated / 23 GB reserved with gradient checkpointing and a per-device batch of 4.
+model: Qwen/Qwen3-0.6B-Base
+train_file: results/gsm8k/teacher_train_n0/accepted.jsonl
+output_dir: checkpoints/gsm8k_0.6b_base_teacher
+max_length: 1024
+epochs: 2
+lr: 1.0e-5          # full fine-tuning
+batch_size: 4
+grad_accum: 8       # effective batch 32
+lora: false
+extra:
+  gradient_checkpointing: true    # keeps it within 24 GB

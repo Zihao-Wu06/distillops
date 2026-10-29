@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 278" width="820" height="278" role="img" aria-label="GSM8K accuracy: untrained 73.8%, human-solution SFT 68.5%, teacher SFT 80.1%, plus GRPO 81.6%, Qwen3-1.7B official 80.2%">
+<style>
+.t{font:600 16px -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;fill:#0b0b0b}
+.s{font:13px -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;fill:#52514e}
+.l{font:13px -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;fill:#0b0b0b}
+.v{font:600 13px -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;fill:#0b0b0b}
+.a{font:11px -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;fill:#898781}
+.hi{fill:#2a78d6}.ctx{fill:#c3c2b7}.g{stroke:#e1e0d9;stroke-width:1}.b{stroke:#c3c2b7;stroke-width:1}
+@media (prefers-color-scheme: dark){.t,.l,.v{fill:#f0efec}.s{fill:#c3c2b7}.hi{fill:#3987e5}.ctx{fill:#4a4945}.g{stroke:#2c2c2a}.b{stroke:#383835}}
+</style>
+<text class="t" x="0" y="22">GSM8K accuracy, Qwen3-1.7B-Base student (all 1,319 test problems)</text>
+<text class="s" x="0" y="44">Teacher: DeepSeek via API, 3.79 CNY (~$0.53) of calls. Same problems and settings for both SFT runs.</text>
+<line class="g" x1="300.0" y1="58" x2="300.0" y2="244"/>
+<text class="a" x="300.0" y="260" text-anchor="middle">0%</text>
+<line class="g" x1="392.0" y1="58" x2="392.0" y2="244"/>
+<text class="a" x="392.0" y="260" text-anchor="middle">20%</text>
+<line class="g" x1="484.0" y1="58" x2="484.0" y2="244"/>
+<text class="a" x="484.0" y="260" text-anchor="middle">40%</text>
+<line class="g" x1="576.0" y1="58" x2="576.0" y2="244"/>
+<text class="a" x="576.0" y="260" text-anchor="middle">60%</text>
+<line class="g" x1="668.0" y1="58" x2="668.0" y2="244"/>
+<text class="a" x="668.0" y="260" text-anchor="middle">80%</text>
+<line class="g" x1="760.0" y1="58" x2="760.0" y2="244"/>
+<text class="a" x="760.0" y="260" text-anchor="middle">100%</text>
+<text class="l" x="288" y="86.5" text-anchor="end">Qwen3-1.7B-Base, untrained</text>
+<path class="ctx" d="M300,72.0 H635.5 Q639.5,72.0 639.5,76.0 V88.0 Q639.5,92.0 635.5,92.0 H300 Z"><title>Qwen3-1.7B-Base, untrained: 73.8%</title></path>
+<text class="v" x="645.5" y="86.5">73.8%</text>
+<text class="l" x="288" y="122.5" text-anchor="end">+ SFT on human solutions (no teacher)</text>
+<path class="ctx" d="M300,108.0 H611.1 Q615.1,108.0 615.1,112.0 V124.0 Q615.1,128.0 611.1,128.0 H300 Z"><title>+ SFT on human solutions (no teacher): 68.5%</title></path>
+<text class="v" x="621.1" y="122.5">68.5%</text>
+<text class="l" x="288" y="158.5" text-anchor="end">+ SFT on teacher reasoning (distillops)</text>
+<path class="hi" d="M300,144.0 H664.5 Q668.5,144.0 668.5,148.0 V160.0 Q668.5,164.0 664.5,164.0 H300 Z"><title>+ SFT on teacher reasoning (distillops): 80.1%</title></path>
+<text class="v" x="674.5" y="158.5">80.1%</text>
+<text class="l" x="288" y="194.5" text-anchor="end">+ GRPO (distillops)</text>
+<path class="hi" d="M300,180.0 H671.4 Q675.4,180.0 675.4,184.0 V196.0 Q675.4,200.0 671.4,200.0 H300 Z"><title>+ GRPO (distillops): 81.6%</title></path>
+<text class="v" x="681.4" y="194.5">81.6%</text>
+<text class="l" x="288" y="230.5" text-anchor="end">Qwen3-1.7B, Qwen's own post-training</text>
+<path class="ctx" d="M300,216.0 H664.9 Q668.9,216.0 668.9,220.0 V232.0 Q668.9,236.0 664.9,236.0 H300 Z"><title>Qwen3-1.7B, Qwen's own post-training: 80.2%</title></path>
+<text class="v" x="674.9" y="230.5">80.2%</text>
+<line class="b" x1="300" y1="58" x2="300" y2="244"/>
+</svg>

@@ -1,9 +1,50 @@
-# distillops — distil an API LLM into a small model, for any task with a verifiable answer
+# distillops
 
-distillops turns a strong API model (the *teacher*) into a small open model you can run yourself,
-for **any task where a program can tell a good answer from a bad one**. You describe the task once,
-in a `Task` class; the same commands then collect verified teacher data, fine-tune, evaluate and run
-reinforcement learning. The framework never needs the teacher's logits, only its text answers.
+**Distil an API LLM into a small open model, for any task with a verifiable answer.**
+
+[![tests](https://github.com/Zihao-Wu06/distillops/actions/workflows/tests.yml/badge.svg)](https://github.com/Zihao-Wu06/distillops/actions/workflows/tests.yml)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![python 3.11 | 3.12](https://img.shields.io/badge/python-3.11%20%7C%203.12-blue.svg)](pyproject.toml)
+
+Under $1 of API calls (3.79 CNY of DeepSeek answers) takes **Qwen3-1.7B-Base from 73.8% to 81.6%** on
+GSM8K, on par with Qwen's own post-trained Qwen3-1.7B (80.2%). Training on GSM8K's human-written
+solutions to the same problems scores 68.5%: the gain comes from the teacher's verified reasoning.
+
+<p align="center"><img src="assets/gsm8k_results.svg" width="820"
+  alt="GSM8K accuracy: untrained 73.8%, SFT on human solutions 68.5%, SFT on teacher reasoning 80.1%, plus GRPO 81.6%, Qwen3-1.7B 80.2%"></p>
+
+You describe a task once, in a `Task` class: its data, prompts, a verifier and a score. The same
+commands then collect verified teacher answers, fine-tune, evaluate and run reinforcement learning
+(GRPO). Only the teacher's text answers are needed, never its logits, so any API model can teach.
+
+**Contents:** [Try it](#try-it) · [What it can be used for](#what-it-can-be-used-for) ·
+[How it works](#how-it-works) · [Add your own task](#add-your-own-task) · [Results](#results) ·
+[Install](#install) · [Hardware](#hardware) · [Reference](#reference) · [Related work](#related-work) ·
+[Layout](#layout)
+
+## Try it
+Distil DeepSeek's math reasoning into Qwen3-0.6B-Base on one 24 GB GPU (e.g. an RTX 4090), for under
+$1 of API calls. The teacher can be any OpenAI-compatible API: copy the template, set `base_url`,
+`model` and `api_key_env`, and export the key.
+```bash
+git clone https://github.com/Zihao-Wu06/distillops && cd distillops
+pip install -e ".[train,dev]"
+cp configs/teacher_template.yaml configs/my_teacher.yaml       # then edit it for your provider
+export TEACHER_API_KEY=...                                      # the variable named by api_key_env
+T=tasks.math.gsm8k:GSM8KTask
+
+python -m distillops eval    --task $T --model Qwen/Qwen3-0.6B-Base --chat-template plain   # 56.8%
+python -m distillops teacher --task $T --teacher configs/my_teacher.yaml --n 100            # smoke test
+python -m distillops teacher --task $T --teacher configs/my_teacher.yaml                   # all 7,473 problems
+python -m distillops sft     configs/sft_qwen3_0.6b_base.yaml
+python -m distillops eval    --task $T --model checkpoints/gsm8k_0.6b_base_teacher          # 65.9%
+```
+**+9.1 points** on all 1,319 test problems (95% CI +6.3 to +11.9). With DeepSeek as the teacher the
+calls cost 3.79 CNY (~$0.53); `python -m distillops usage --teacher configs/my_teacher.yaml` reports the
+tokens. Measured on an RTX PRO 6000 with GPU memory capped at 24 GB: SFT took 7 minutes and peaked at
+14 GB allocated (23 GB reserved); slower cards take longer. The same commands work for your own task
+once it has a `Task` class ([Add your own task](#add-your-own-task)); [Results](#results) has the
+1.7B route behind the chart above, with GRPO on top.
 
 ## What it can be used for
 The one requirement: given an input and an output, your code can say whether the output is right
@@ -54,7 +95,7 @@ is specific to them. Any other task needs only its own `Task` class
 `verify` decides which teacher outputs become training data; `score` is both the evaluation metric
 and the GRPO reward, so reinforcement learning optimises exactly what you report.
 
-## Highlights
+### Features
 - **Any verifiable task, one class.** Teacher calls, rejection sampling, SFT, evaluation and GRPO are
   shared; a task only supplies data, prompts, a verifier and a score.
 - **Any student model.** Any causal LM from the Hugging Face hub or a local path can be the student
@@ -68,19 +109,166 @@ and the GRPO reward, so reinforcement learning optimises exactly what you report
   updates that never landed.
 - **Runs on the GPU you have.** Precision is chosen from the hardware, batch sizes from free memory and
   the model's size, and disk space is checked before training; `doctor` reports all of it.
-- **Example results.** GSM8K: 3.79 CNY of teacher calls take a base model (Qwen3-1.7B-Base) from 73.8%
-  to **81.6%**, on par with Qwen's own post-trained Qwen3-1.7B (80.2%). Recommendation: a fine-tuned 1.7B
-  model distilled into two ~0.5M-parameter SASRecs reaches **HR@10 .164 / NDCG@10 .119**, on par with
-  recent LLM recommenders at ~1/1,500 of their serving size.
 
-## Contents
-[Install](#install) · [Hardware](#hardware) · [Quick start](#quick-start) · [Add your own task](#add-your-own-task) ·
-[Commands](#commands) · [Configuration](#configuration) · [Outputs](#outputs) ·
-[What the framework handles](#what-the-framework-handles) ·
-[Included examples and results](#included-examples-and-results) · [Related work](#related-work) · [Layout](#layout)
+## Add your own task
+A complete task: support tickets classified into a fixed label set, with the teacher explaining its
+choice. Save it as e.g. `my_tasks/triage.py`.
+
+```python
+import json
+import re
+
+from distillops.task import Task, Verdict
+
+class TicketTriage(Task):
+    name = "triage"
+    LABELS = ["billing", "bug", "feature", "other"]
+
+    def load_examples(self, split):  # any source; here JSONL rows {"id", "text", "label"}
+        with open(f"data/triage_{split}.jsonl", encoding="utf-8") as f:
+            return [json.loads(line) for line in f]
+
+    def example_id(self, ex):
+        return ex["id"]
+
+    def teacher_messages(self, ex, attempt):
+        return [{"role": "user", "content": f"{ex['text']}\n\nExplain in one or two sentences which "
+                 f"team should handle this, then end with: LABEL: <one of {', '.join(self.LABELS)}>"}]
+
+    def parse_teacher(self, ex, text):
+        found = re.findall(r"LABEL:\s*(\w+)", text)
+        return found[-1].lower() if found else None
+
+    def verify(self, ex, parsed, text, attempt):
+        if parsed not in self.LABELS:
+            return Verdict(False, "parse_error")
+        return Verdict(parsed == ex["label"], "ok" if parsed == ex["label"] else "wrong_label")
+
+    def sft_example(self, ex, parsed, text):
+        return {"prompt": self.student_messages(ex), "completion": [{"role": "assistant", "content": text}]}
+
+    def student_messages(self, ex):
+        return [{"role": "user", "content": f"{ex['text']}\n\nEnd with: LABEL: <one of {', '.join(self.LABELS)}>"}]
+
+    def score(self, ex, completion):
+        return float(self.parse_teacher(ex, completion) == ex["label"])
+
+    def gold_sft_example(self, ex):  # optional: the no-teacher control for `labels`
+        return {"prompt": self.student_messages(ex),
+                "completion": [{"role": "assistant", "content": f"LABEL: {ex['label']}"}]}
+```
+
+```bash
+python scripts/check_task.py --task my_tasks.triage:TicketTriage --model Qwen/Qwen3-0.6B  # data, prompts, masked row
+python -m distillops teacher --task my_tasks.triage:TicketTriage --teacher configs/my_teacher.yaml --n 50
+# then labels / sft / eval / grpo as in Try it
+```
+
+The methods, with the included GSM8K example for comparison:
+
+| Method | Purpose | GSM8K |
+|---|---|---|
+| `load_examples(split)` | your dataset (a `valid` split, if any, is used for GRPO validation) | `datasets.load_dataset("openai/gsm8k")` |
+| `example_id(ex)` | stable id (logging, resume, `--exclude`, `--keep-ids`) | `"gsm8k:train:17"` |
+| `teacher_messages(ex, attempt)` | prompt for the teacher | question + "end with `ANSWER: <number>`" |
+| `parse_teacher(ex, text)` | raw text -> structured answer | steps + final number |
+| `verify(ex, parsed, text, attempt)` | **the distillation filter** | number equals gold, length limit |
+| `sft_example(ex, parsed, text)` | accepted output -> training row | `<think>steps</think>ANSWER: n` |
+| `student_messages(ex)` | the student's prompt | question + answer-format instruction |
+| `score(ex, completion)` | metric **and** GRPO reward, in [0, 1] | 1 if the final number is right |
+| `gold_sft_example(ex)` *(optional)* | label-only control row | `ANSWER: n`, or the human solution |
+| `extra_metrics(examples, completions, scores)` *(optional)* | metrics over the whole set, next to the mean `score` (e.g. macro-F1, BLEU) | - |
+| `evaluate(...)` *(optional)* | custom decoding | - (recommendation overrides it with constrained beam search) |
+
+Constructor arguments can be passed on the command line, e.g. `--task-arg max_words=200`.
+
+**Writing a good verifier is most of the work.** Teachers break instructions in ways that would
+teach the student the wrong thing (e.g. referring to information only the teacher saw); `verify` is
+where those outputs are dropped. Read accepted samples before scaling up. If GRPO's pass-rate filter
+reports a sparse reward, a `score` that gives partial credit is the first thing to try.
+
+## Results
+The two included examples, chosen to be very different, show what the framework does and
+how well; their code lives in `tasks/` and is not needed for your own task.
+
+### Math: GSM8K (Qwen3-1.7B-Base student, all 1,319 test problems)
+| Model | Accuracy |
+|---|---|
+| Qwen3-1.7B-Base, untrained (zero-shot, plain prompt) | 73.8% |
+| + SFT on GSM8K's human solutions (same problems and settings, no teacher) | 68.5% |
+| **+ SFT on DeepSeek reasoning (rejection-sampled, full fine-tuning)** | **80.1%** |
+| **+ GRPO (1 epoch, reward = `Task.score`)** | **81.6%** |
+| *Qwen3-1.7B: Qwen's own post-trained model, for reference* | *80.2%* |
+
+Teacher: DeepSeek Flash, 7,274 of 7,473 problems accepted (97.3%), **3.79 CNY**. The student is a base
+model, which has seen no post-training on math, so the gain is the distillation's own. Paired over
+the 1,319 problems: SFT adds **+6.3 points** (95% CI +3.9 to +8.6, p < 1e-6) and GRPO with the same
+verifier as reward **+1.6** more (+0.2 to +3.1, p = 0.046); the result is on par with Qwen's post-trained
+Qwen3-1.7B (+1.4, CI -0.8 to +3.6, p = 0.24). Before GRPO, 40.7% of training prompts carried a learning
+signal (57.3% were always solved); GRPO ran 96 steps and token entropy went 0.19 -> 0.15 (no collapse).
+The no-teacher control (`labels --task-arg label_reasoning=human`, same 7,274 problems, same SFT
+settings) scores 68.5%, below the untrained model; the teacher's reasoning beats it by **+11.6 points**
+(+9.1 to +14.3, p < 1e-17), so the gain comes from the teacher, not from training on GSM8K problems.
+Training is not bit-for-bit repeatable on GPUs: an earlier run of the same route gave 78.5% / 80.4%
+(no significant difference from these numbers). The smaller [Try it](#try-it) route, Qwen3-0.6B-Base
+with the same teacher answers and no GRPO, goes from 56.8% to 65.9%.
+
+#### Reproduce it
+The full route behind the chart, with the teacher set up as in [Try it](#try-it). The teacher
+answers are the same as there: after Try it, the two `teacher` commands send no requests.
+```bash
+T=tasks.math.gsm8k:GSM8KTask
+TEACHER=configs/my_teacher.yaml
+B=Qwen/Qwen3-1.7B-Base
+
+python -m distillops eval    --task $T --model $B --chat-template plain             # baseline: 73.8%
+python -m distillops teacher --task $T --teacher $TEACHER --n 100                   # smoke test on 100 problems
+python -m distillops teacher --task $T --teacher $TEACHER                           # full train split
+python -m distillops sft     configs/sft_qwen3_full.yaml                             # writes checkpoints/gsm8k_1.7b_base_teacher
+python -m distillops eval    --task $T --model checkpoints/gsm8k_1.7b_base_teacher   # 80.1%
+
+# GRPO (Linux + vLLM): measure the learning signal first, then train on the useful prompts
+python -m distillops grpo configs/grpo_gsm8k_qwen3_1.7b_base.yaml --task $T --filter-samples 8 --filter-only
+python -m distillops grpo configs/grpo_gsm8k_qwen3_1.7b_base.yaml --task $T \
+         --keep-ids checkpoints/gsm8k_1.7b_base_grpo/pass_rate_kept.txt --epochs 1
+python -m distillops eval    --task $T --model checkpoints/gsm8k_1.7b_base_grpo      # 81.6%
+python -m distillops usage   --teacher $TEACHER                                     # teacher calls and tokens
+```
+- **Full fine-tuning, not LoRA:** the base model's chat-template tokens (`<|im_start|>`, `<|im_end|>`,
+  `<think>`) were never trained, and LoRA cannot learn embeddings; with LoRA, `sft` stops and says so.
+  Full fine-tuning of 1.7B parameters needs ~33 GB plus activations (and vLLM's share during GRPO);
+  the results were produced on a 96 GB GPU.
+- **Baseline:** a base model is scored with the `plain` template (it has not learned the chat format);
+  4-shot prompting scored lower (68.1%), so 73.8% is the baseline.
+- **GRPO validation:** SFT saw nearly every training problem, and the few it did not are ones the
+  teacher failed, so there is no representative validation set: the config sets `eval_every: 0` and
+  GRPO keeps its final model. To select checkpoints instead, set problems apart with
+  `--task-arg valid_size=500` on both `teacher` and `grpo`, and turn `eval_every` back on.
+- **Teacher:** the included results used DeepSeek (`configs/teacher_deepseek.yaml`); the GSM8K teacher
+  calls cost 3.79 CNY (3.74 for the full run, 0.05 for the 100-problem smoke test).
+
+### Recommendation: an LLM teacher for a deployable recommender
+A task far from math: next-item recommendation on Amazon Industrial & Scientific. A fine-tuned
+Qwen3-1.7B recommends well but is too large to serve, so it is used offline as a teacher (item
+embeddings + top-3 soft labels) for SASRec. Two ~0.5M-parameter SASRecs then reach **HR@10 .164 /
+NDCG@10 .119**, on par with recent LLM recommenders (1.5B-7B parameters, HR@10 .159-.163) at ~1/1,500
+of their serving size. Tables, cold-start results and the commands to reproduce:
+[tasks/rec/README.md](tasks/rec/README.md).
+
+### Takeaways
+1. A few CNY of verified teacher reasoning replace a model's math post-training: on GSM8K, SFT takes a
+   base model +6.3 points and GRPO with the same verifier as reward +1.6 more, matching Qwen's own
+   post-trained model of the same size.
+2. Always compare against a same-data, no-teacher control (`python -m distillops labels`), not just the
+   untrained model, to see what the teacher itself contributes: on GSM8K, SFT on the human solutions of
+   the same problems lowered the score (73.8% -> 68.5%) while the teacher's reasoning raised it (80.1%).
+3. For latency-bound products, use the LLM as an offline teacher: item embeddings plus soft labels lifted
+   SASRec by 22-24% HR@10, and a two-stage recall + re-rank matched recent LLM recommenders, at
+   unchanged serving cost.
 
 ## Install
 ```bash
+git clone https://github.com/Zihao-Wu06/distillops && cd distillops
 pip install -e ".[train,dev]"          # framework, training stack and tests
 pip install "vllm==0.11.0"             # only for GRPO and the pass-rate filter (Linux)
 python -m distillops doctor            # GPU, chosen precision, free memory and disk, library versions
@@ -124,122 +312,10 @@ What adapts and what does not:
   hold the run, and GRPO stops at once if vLLM's share of the GPU is not free, naming the setting to lower.
 - One GPU per run; multi-GPU launches (`accelerate`, `torchrun`) are not tested.
 
-## Quick start
-The whole workflow on the included GSM8K example. For your own task, set `T` to its import path; the
-commands stay the same. The teacher can be any OpenAI-compatible API: copy
-`configs/teacher_template.yaml`, set `base_url`, `model` and `api_key_env`, and export the key.
-```bash
-cp configs/teacher_template.yaml configs/my_teacher.yaml       # then edit it for your provider
-export TEACHER_API_KEY=...                                      # the variable named by api_key_env
-T=tasks.math.gsm8k:GSM8KTask
-TEACHER=configs/my_teacher.yaml
-B=Qwen/Qwen3-1.7B-Base
+## Reference
+<details>
+<summary><b>Commands</b></summary>
 
-python -m distillops eval    --task $T --model $B --chat-template plain             # baseline: 73.8%
-python -m distillops teacher --task $T --teacher $TEACHER --n 100                   # smoke test on 100 problems
-python -m distillops teacher --task $T --teacher $TEACHER                           # full train split
-python -m distillops sft     configs/sft_qwen3_full.yaml                             # writes checkpoints/gsm8k_1.7b_base_teacher
-python -m distillops eval    --task $T --model checkpoints/gsm8k_1.7b_base_teacher   # 80.1%
-
-# GRPO (Linux + vLLM): measure the learning signal first, then train on the useful prompts
-python -m distillops grpo configs/grpo_gsm8k_qwen3_1.7b_base.yaml --task $T --filter-samples 8 --filter-only
-python -m distillops grpo configs/grpo_gsm8k_qwen3_1.7b_base.yaml --task $T \
-         --keep-ids checkpoints/gsm8k_1.7b_base_grpo/pass_rate_kept.txt --epochs 1
-python -m distillops eval    --task $T --model checkpoints/gsm8k_1.7b_base_grpo      # 81.6%
-python -m distillops usage   --teacher $TEACHER                                     # teacher calls and tokens
-```
-- **Full fine-tuning, not LoRA:** the base model's chat-template tokens (`<|im_start|>`, `<|im_end|>`,
-  `<think>`) were never trained, and LoRA cannot learn embeddings; with LoRA, `sft` stops and says so.
-  Full fine-tuning of 1.7B parameters needs ~33 GB plus activations (and vLLM's share during GRPO);
-  the results were produced on a 96 GB GPU.
-- **Baseline:** a base model is scored with the `plain` template (it has not learned the chat format);
-  4-shot prompting scored lower (68.1%), so 73.8% is the baseline.
-- **GRPO validation:** SFT saw nearly every training problem, and the few it did not are ones the
-  teacher failed, so there is no representative validation set: the config sets `eval_every: 0` and
-  GRPO keeps its final model. To select checkpoints instead, set problems apart with
-  `--task-arg valid_size=500` on both `teacher` and `grpo`, and turn `eval_every` back on.
-- **Teacher:** the included results used DeepSeek (`configs/teacher_deepseek.yaml`); the GSM8K teacher
-  calls cost 3.79 CNY (3.74 for the full run, 0.05 for the 100-problem smoke test).
-
-## Add your own task
-A complete task: support tickets classified into a fixed label set, with the teacher explaining its
-choice. Save it as e.g. `my_tasks/triage.py`.
-
-```python
-import json
-import re
-
-from distillops.task import Task, Verdict
-
-
-class TicketTriage(Task):
-    name = "triage"
-    LABELS = ["billing", "bug", "feature", "other"]
-
-    def load_examples(self, split):  # any source; here JSONL rows {"id", "text", "label"}
-        with open(f"data/triage_{split}.jsonl", encoding="utf-8") as f:
-            return [json.loads(line) for line in f]
-
-    def example_id(self, ex):
-        return ex["id"]
-
-    def teacher_messages(self, ex, attempt):
-        return [{"role": "user", "content": f"{ex['text']}\n\nExplain in one or two sentences which "
-                 f"team should handle this, then end with: LABEL: <one of {', '.join(self.LABELS)}>"}]
-
-    def parse_teacher(self, ex, text):
-        found = re.findall(r"LABEL:\s*(\w+)", text)
-        return found[-1].lower() if found else None
-
-    def verify(self, ex, parsed, text, attempt):
-        if parsed not in self.LABELS:
-            return Verdict(False, "parse_error")
-        return Verdict(parsed == ex["label"], "ok" if parsed == ex["label"] else "wrong_label")
-
-    def sft_example(self, ex, parsed, text):
-        return {"prompt": self.student_messages(ex), "completion": [{"role": "assistant", "content": text}]}
-
-    def student_messages(self, ex):
-        return [{"role": "user", "content": f"{ex['text']}\n\nEnd with: LABEL: <one of {', '.join(self.LABELS)}>"}]
-
-    def score(self, ex, completion):
-        return float(self.parse_teacher(ex, completion) == ex["label"])
-
-    def gold_sft_example(self, ex):  # optional: the no-teacher control for `labels`
-        return {"prompt": self.student_messages(ex),
-                "completion": [{"role": "assistant", "content": f"LABEL: {ex['label']}"}]}
-```
-
-```bash
-python scripts/check_task.py --task my_tasks.triage:TicketTriage --model Qwen/Qwen3-0.6B  # data, prompts, masked row
-python -m distillops teacher --task my_tasks.triage:TicketTriage --teacher configs/my_teacher.yaml --n 50
-# then labels / sft / eval / grpo as in Quick start
-```
-
-The methods, with the included GSM8K example for comparison:
-
-| Method | Purpose | GSM8K |
-|---|---|---|
-| `load_examples(split)` | your dataset (a `valid` split, if any, is used for GRPO validation) | `datasets.load_dataset("openai/gsm8k")` |
-| `example_id(ex)` | stable id (logging, resume, `--exclude`, `--keep-ids`) | `"gsm8k:train:17"` |
-| `teacher_messages(ex, attempt)` | prompt for the teacher | question + "end with `ANSWER: <number>`" |
-| `parse_teacher(ex, text)` | raw text -> structured answer | steps + final number |
-| `verify(ex, parsed, text, attempt)` | **the distillation filter** | number equals gold, length limit |
-| `sft_example(ex, parsed, text)` | accepted output -> training row | `<think>steps</think>ANSWER: n` |
-| `student_messages(ex)` | the student's prompt | question + answer-format instruction |
-| `score(ex, completion)` | metric **and** GRPO reward, in [0, 1] | 1 if the final number is right |
-| `gold_sft_example(ex)` *(optional)* | label-only control row | `ANSWER: n`, or the human solution |
-| `extra_metrics(examples, completions, scores)` *(optional)* | metrics over the whole set, next to the mean `score` (e.g. macro-F1, BLEU) | - |
-| `evaluate(...)` *(optional)* | custom decoding | - (recommendation overrides it with constrained beam search) |
-
-Constructor arguments can be passed on the command line, e.g. `--task-arg max_words=200`.
-
-**Writing a good verifier is most of the work.** Teachers break instructions in ways that would
-teach the student the wrong thing (e.g. referring to information only the teacher saw); `verify` is
-where those outputs are dropped. Read accepted samples before scaling up. If GRPO's pass-rate filter
-reports a sparse reward, a `score` that gives partial credit is the first thing to try.
-
-## Commands
 `python -m distillops <command> --help` lists every flag. Commands that read a dataset share
 `--task module:Class` (or a YAML file with `task:` and `args:`), `--task-arg KEY=VALUE` (constructor
 arguments, repeatable), `--split`, `--n` (random subset, 0 = all) and `--seed`.
@@ -262,7 +338,11 @@ were dropped, and writes `pass_rate_kept.txt`; `--keep-ids` then trains on
 those prompts in a fresh process. `--exclude <jsonl>` skips prompts whose `meta.id` appears in a file
 (e.g. the SFT data). `--epochs E` sets the number of steps so each prompt is seen E times.
 
-## Configuration
+</details>
+
+<details>
+<summary><b>Configuration (teacher, student model, SFT, GRPO)</b></summary>
+
 Every option has a default and can be changed in the YAML file. Whenever the framework chooses
 something itself (micro-batch, precision, validation source), it prints what it chose and why.
 
@@ -304,7 +384,7 @@ results used it.
 - **No CUDA GPU.** SFT, evaluation and GRPO with `use_vllm: false` run on the CPU (slow, but
   fine for small models); GRPO with vLLM and the pass-rate filter need a Linux GPU.
 
-### SFT (`configs/sft_qwen3.yaml` with LoRA; `configs/sft_qwen3_full.yaml` with full fine-tuning)
+### SFT (`configs/sft_qwen3.yaml` with LoRA; `configs/sft_qwen3_full.yaml` and `configs/sft_qwen3_0.6b_base.yaml` with full fine-tuning)
 | Field | Default | Meaning |
 |---|---|---|
 | `model`, `train_file`, `output_dir` | required | base model, JSONL of prompt/completion rows, where to write |
@@ -347,7 +427,11 @@ optimizer state and every checkpoint); disk space for what will be written is ch
 | `seed`, `logging_steps`, `save_steps` | 42, 5, 100 | |
 | `extra` | `{}` | any TRL `GRPOConfig` argument, as for SFT (e.g. `epsilon_high`, `report_to`); checkpoints default to weights only, one kept (`save_only_model`, `save_total_limit`) |
 
-## Outputs
+</details>
+
+<details>
+<summary><b>Outputs</b></summary>
+
 | Command | Writes |
 |---|---|
 | `teacher` | `results/<task>/teacher_<split>_n<n>[_<task args>]/`: `run.json` (teacher, task settings, and hashes of the teacher prompt and task code), `accepted.jsonl` (SFT rows), `log.jsonl` (every attempt and verdict; reruns resume from it), `stats.json` (yield, rejection reasons, token usage) |
@@ -357,7 +441,11 @@ optimizer state and every checkpoint); disk space for what will be written is ch
 | `grpo --filter-only` | `output_dir/pass_rate_filter.json` (statistics and advice), `output_dir/pass_rate_kept.txt` |
 | `grpo` | `output_dir/` = **best model on validation** (a copy of the start model if nothing beat it; the final model when there is no validation), `output_dir/last/` = final model, `trained_ids.txt`, `output_dir/validation.json` (scores per check, best step, weight change, entropy stop) |
 
-## What the framework handles
+</details>
+
+<details>
+<summary><b>What the framework handles</b></summary>
+
 - **Teacher client** (`distillops/teacher.py`): any OpenAI-compatible API; configurable concurrency,
   retries with backoff for network errors, rate limits and server errors only, an on-disk response cache
   (a re-run sends no repeated request) and a token counter.
@@ -373,103 +461,7 @@ optimizer state and every checkpoint); disk space for what will be written is ch
 - **Model-agnostic** (`distillops/chat.py`, `memory.py`): any causal LM; a chat template for models
   without one, and config sizes read under each architecture's field names.
 
-## Included examples and results
-The two example tasks exist to show the workflow and what it achieves; their code lives in `tasks/`
-and is not needed to use the framework on your own task.
-
-### Math: GSM8K (Qwen3-1.7B-Base student, all 1,319 test problems)
-| Model | Accuracy |
-|---|---|
-| Qwen3-1.7B-Base, untrained (zero-shot, plain prompt) | 73.8% |
-| + SFT on GSM8K's human solutions (same problems and settings, no teacher) | 68.5% |
-| **+ SFT on DeepSeek reasoning (rejection-sampled, full fine-tuning)** | **80.1%** |
-| **+ GRPO (1 epoch, reward = `Task.score`)** | **81.6%** |
-| *Qwen3-1.7B: Qwen's own post-trained model, for reference* | *80.2%* |
-
-Teacher: DeepSeek Flash, 7,274 of 7,473 problems accepted (97.3%), **3.79 CNY**. The student is a base
-model, which has seen no post-training on math, so the gain is the distillation's own. Paired over
-the 1,319 problems: SFT adds **+6.3 points** (95% CI +3.9 to +8.6, p < 1e-6) and GRPO with the same
-verifier as reward **+1.6** more (+0.2 to +3.1, p = 0.046); the result is on par with Qwen's post-trained
-Qwen3-1.7B (+1.4, CI -0.8 to +3.6, p = 0.24). Before GRPO, 40.7% of training prompts carried a learning
-signal (57.3% were always solved); GRPO ran 96 steps and token entropy went 0.19 -> 0.15 (no collapse).
-The no-teacher control (`labels --task-arg label_reasoning=human`, same 7,274 problems, same SFT
-settings) scores 68.5%, below the untrained model; the teacher's reasoning beats it by **+11.6 points**
-(+9.1 to +14.3, p < 1e-17), so the gain comes from the teacher, not from training on GSM8K problems.
-Training is not bit-for-bit repeatable on GPUs: an earlier run of the same route gave 78.5% / 80.4%
-(no significant difference from these numbers).
-
-### Recommendation: an LLM recommender as teacher (Amazon Industrial, 1,000 test users)
-| Model | HR@10 | NDCG@10 |
-|---|---|---|
-| Popularity | .058 | .051 |
-| SASRec (tuned) | .136 | .106 |
-| Qwen3-0.6B, untrained | .103 | .061 |
-| Qwen3-0.6B SFT on purchase histories | .138 | .097 |
-| **Qwen3-1.7B SFT on purchase histories (teacher below)** | **.147** | **.1005** |
-
-The LLM generates the next item's title under a catalog-trie constraint (no invalid items). It is
-accurate but too large to serve, so it is used offline as the teacher for SASRec.
-
-### Recommendation: distilling the LLM into deployable SASRec (full test set, 4,533 users, 3 seeds)
-```
-Qwen3-1.7B (SFT on real purchases, HR@10 .147)
-   ├─ item understanding: title embeddings ──┐
-   └─ ranking knowledge: top-3 soft labels ──┴─► SASRec A' (recall top-20) ─┐
-                                                 original SASRec ────────────┴─► 0.5/0.5 score blend -> top-10
-```
-| Model | Serving size | HR@3 | NDCG@3 | HR@5 | NDCG@5 | HR@10 | NDCG@10 |
-|---|---|---|---|---|---|---|---|
-| SASRec (our tuned baseline) | 0.5M | .102 | .093 | .115 | .098 | .134 | .104 |
-| SASRec + LLM item vectors + ranking KD (A') | 0.5M | .107 | .090 | .129 | .099 | **.166** | .111 |
-| **Two-stage: A' recall top-20 + SASRec re-rank** | **2 x 0.5M** | **.113** | **.101** | **.132** | **.109** | .164 | **.119** |
-| *MiniOneRec (Oct 2025), as reported* | 1.5B-7B LLM | .114 | .101 | .132 | .108 | .159 | .117 |
-| *S-GRec (Feb 2026), as reported* | 1.5B LLM | .116 | .103 | .136 | .111 | .163 | .120 |
-| *SASRec, as reported in those papers* | 0.5M | .079 | .070 | .091 | .075 | .109 | .081 |
-
-Hyper-parameters (teacher top-k, distillation weight, blend weight) are chosen on the validation set;
-the test set is reported once. Same data splits as MiniOneRec; metrics follow its evaluation script,
-but the papers generate semantic IDs while we rank titles, so the comparison is close, not exact.
-
-Cold-start (HR@10 on test targets never seen in training, 147 users): original SASRec .000;
-SASRec on LLM item vectors only .030; rarely seen items (1-5 occurrences, 354 users) .001 -> .032.
-The two-stage system loses this (its re-ranker is ID-based); routing unseen items past the re-ranker is the
-standard fix and is not yet measured.
-
-### Takeaways
-1. A few CNY of verified teacher reasoning replace a model's math post-training: on GSM8K, SFT takes a
-   base model +6.3 points and GRPO with the same verifier as reward +1.6 more, matching Qwen's own
-   post-trained model of the same size.
-2. Always compare against a same-data, no-teacher control (`python -m distillops labels`), not just the
-   untrained model, to see what the teacher itself contributes: on GSM8K, SFT on the human solutions of
-   the same problems lowered the score (73.8% -> 68.5%) while the teacher's reasoning raised it (80.1%).
-3. For latency-bound products, use the LLM as an offline teacher: item embeddings plus soft labels lifted
-   SASRec by 22-24% HR@10, and a two-stage recall + re-rank matched recent LLM recommenders, at
-   unchanged serving cost.
-
-### Reproduce the recommendation example
-```bash
-C=Industrial_and_Scientific
-python scripts/rec_prepare.py --category $C          # data download, popularity baseline, first SASRec
-python scripts/rec_sasrec_sweep.py --category $C     # tuned SASRec (16 configs, selected on validation)
-
-# 1) the LLM teacher: Qwen3-1.7B SFT on 6,612 users' purchase histories
-python scripts/rec_build_sft.py --variant noreason --match-row-ids tasks/rec/resources/industrial_sft_rows.txt
-python -m distillops sft configs/sft_rec_qwen3.yaml   # Qwen3-1.7B, writes checkpoints/rec_qwen3_1.7b
-python scripts/rec_eval_llm.py --model checkpoints/rec_qwen3_1.7b/merged --n 1000 --tag sft-1.7b
-
-# 2) distil into SASRec: item vectors, then soft labels on users the teacher was not trained on
-python scripts/rec_sasrec_distill.py embed --model Qwen/Qwen3-1.7B --tag base17
-python scripts/rec_sasrec_distill.py topk  --model checkpoints/rec_qwen3_1.7b/merged --tag sft17 \
-         --beams 10 --n 12000 --exclude data/sft/$C/noreason_matched.jsonl
-python scripts/rec_sasrec_distill.py train --emb base17 --kd sft17 --kd-weight 1 --kd-topk 3 \
-         --only fused-tied+kd --seeds 3 --name A_prime
-
-# 3) two-stage recall + re-rank (blend weight chosen on validation), 3 seeds, then the summary table
-for s in 42 43 44; do python scripts/rec_two_stage.py --seed $s --out results/$C/two_stage/seed$s.json; done
-python scripts/rec_two_stage.py --summarise results/$C/two_stage
-```
-`rec_sasrec_distill.py train` also offers `--kd-power` (sharper rank weights) and variants `id`,
-`id-tied`, `fused`, `fused-tied`, `llm-tied` (item representation) with or without `+kd`.
+</details>
 
 ## Related work
 - **Distillation toolkits.** [EasyDistill](https://github.com/modelscope/easydistill) (Alibaba, EMNLP 2025
@@ -478,12 +470,7 @@ python scripts/rec_two_stage.py --summarise results/$C/two_stage
   on logit-level distillation. distillops is narrower (text tasks) and goes deeper on the training loop:
   verification-based rejection sampling, no-teacher controls, built-in GRPO and its diagnostics.
   Training itself runs on [TRL](https://github.com/huggingface/trl).
-- **LLM recommenders into sequential recommenders.** DLLM2Rec (RecSys 2024) distils LLM-based
-  recommenders into conventional ones with ranking and embedding distillation, the approach followed
-  here; LLM-ESR and LLMEmb use LLM item representations to strengthen sequential recommenders; SLMRec
-  (ICLR 2025) distils into a smaller LLM. Benchmark and baselines follow
-  [MiniOneRec](https://github.com/AkaliKong/MiniOneRec); S-GRec (arXiv 2602.10606) is the most recent
-  result we compare against.
+- **LLM recommenders into sequential recommenders:** see [tasks/rec/README.md](tasks/rec/README.md#related-work).
 
 ## Layout
 ```
@@ -491,11 +478,12 @@ distillops/       the framework: teacher, task interface, rejection sampling, sf
                   chat (templates), precision / memory / preflight, cli
 tasks/            the two included example tasks (not needed for your own):
   math/           GSM8K, also the reference implementation of a Task
-  rec/            recommendation: data, SASRec baseline and distillation, prompts, title trie,
+  rec/            recommendation (its own README.md): data, SASRec baseline and distillation, prompts, title trie,
                   constrained beams, item embeddings; resources/ holds the SFT user list
 scripts/          check_task.py (any task); rec_*.py: the recommendation example (prepare, SASRec sweep,
                   build SFT data, LLM / SASRec eval, paired comparison, SASRec distillation, two-stage)
 configs/          teacher, SFT and GRPO configs (example settings)
+assets/           README figures
 tests/            unit tests; no network or GPU needed
 ```
 `data/`, `results/`, `checkpoints/` and `cache/` are created at run time and not tracked.
