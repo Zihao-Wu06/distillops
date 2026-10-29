@@ -69,7 +69,7 @@ and the GRPO reward, so reinforcement learning optimises exactly what you report
 - **Runs on the GPU you have.** Precision is chosen from the hardware, batch sizes from free memory and
   the model's size, and disk space is checked before training; `doctor` reports all of it.
 - **Example results.** GSM8K: 3.79 CNY of teacher calls take a base model (Qwen3-1.7B-Base) from 73.8%
-  to **80.4%**, level with Qwen's own post-trained Qwen3-1.7B (80.2%). Recommendation: a fine-tuned 1.7B
+  to **81.6%**, on par with Qwen's own post-trained Qwen3-1.7B (80.2%). Recommendation: a fine-tuned 1.7B
   model distilled into two ~0.5M-parameter SASRecs reaches **HR@10 .164 / NDCG@10 .119**, on par with
   recent LLM recommenders at ~1/1,500 of their serving size.
 
@@ -139,13 +139,13 @@ python -m distillops eval    --task $T --model $B --chat-template plain         
 python -m distillops teacher --task $T --teacher $TEACHER --n 100                   # smoke test on 100 problems
 python -m distillops teacher --task $T --teacher $TEACHER                           # full train split
 python -m distillops sft     configs/sft_qwen3_full.yaml                             # writes checkpoints/gsm8k_1.7b_base_teacher
-python -m distillops eval    --task $T --model checkpoints/gsm8k_1.7b_base_teacher   # 78.5%
+python -m distillops eval    --task $T --model checkpoints/gsm8k_1.7b_base_teacher   # 80.1%
 
 # GRPO (Linux + vLLM): measure the learning signal first, then train on the useful prompts
 python -m distillops grpo configs/grpo_gsm8k_qwen3_1.7b_base.yaml --task $T --filter-samples 8 --filter-only
 python -m distillops grpo configs/grpo_gsm8k_qwen3_1.7b_base.yaml --task $T \
          --keep-ids checkpoints/gsm8k_1.7b_base_grpo/pass_rate_kept.txt --epochs 1
-python -m distillops eval    --task $T --model checkpoints/gsm8k_1.7b_base_grpo      # 80.4%
+python -m distillops eval    --task $T --model checkpoints/gsm8k_1.7b_base_grpo      # 81.6%
 python -m distillops usage   --teacher $TEACHER                                     # teacher calls and tokens
 ```
 - **Full fine-tuning, not LoRA:** the base model's chat-template tokens (`<|im_start|>`, `<|im_end|>`,
@@ -381,16 +381,18 @@ and is not needed to use the framework on your own task.
 | Model | Accuracy |
 |---|---|
 | Qwen3-1.7B-Base, untrained (zero-shot, plain prompt) | 73.8% |
-| **+ SFT on DeepSeek reasoning (rejection-sampled, full fine-tuning)** | **78.5%** |
-| **+ GRPO (1 epoch, reward = `Task.score`)** | **80.4%** |
+| **+ SFT on DeepSeek reasoning (rejection-sampled, full fine-tuning)** | **80.1%** |
+| **+ GRPO (1 epoch, reward = `Task.score`)** | **81.6%** |
 | *Qwen3-1.7B: Qwen's own post-trained model, for reference* | *80.2%* |
 
 Teacher: DeepSeek Flash, 7,274 of 7,473 problems accepted (97.3%), **3.79 CNY**. The student is a base
 model, which has seen no post-training on math, so the gain is the distillation's own. Paired over
-the 1,319 problems: SFT adds **+4.7 points** (95% CI +2.4 to +7.1, p < 1e-4) and GRPO with the same
-verifier as reward **+1.9** more (+0.3 to +3.5, p = 0.02); the result is level with Qwen's post-trained
-Qwen3-1.7B (+0.2, p = 0.9). Before GRPO, 34.6% of training prompts carried a learning signal (63.6%
-were always solved); token entropy went 0.17 -> 0.15 (no collapse).
+the 1,319 problems: SFT adds **+6.3 points** (95% CI +3.9 to +8.6, p < 1e-6) and GRPO with the same
+verifier as reward **+1.6** more (+0.2 to +3.1, p = 0.046); the result is on par with Qwen's post-trained
+Qwen3-1.7B (+1.4, CI -0.8 to +3.6, p = 0.24). Before GRPO, 40.7% of training prompts carried a learning
+signal (57.3% were always solved); GRPO ran 96 steps and token entropy went 0.19 -> 0.15 (no collapse).
+Training is not bit-for-bit repeatable on GPUs: an earlier run of the same route gave 78.5% / 80.4%
+(no significant difference from these numbers).
 
 ### Recommendation: an LLM recommender as teacher (Amazon Industrial, 1,000 test users)
 | Model | HR@10 | NDCG@10 |
@@ -431,7 +433,7 @@ standard fix and is not yet measured.
 
 ### Takeaways
 1. A few CNY of verified teacher reasoning replace a model's math post-training: on GSM8K, SFT takes a
-   base model +4.7 points and GRPO with the same verifier as reward +1.9 more, matching Qwen's own
+   base model +6.3 points and GRPO with the same verifier as reward +1.6 more, matching Qwen's own
    post-trained model of the same size.
 2. Always compare against a same-data, no-teacher control (`python -m distillops labels`), not just the
    untrained model, to see what the teacher itself contributes.
