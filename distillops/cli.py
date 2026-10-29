@@ -64,6 +64,14 @@ def args_suffix(kwargs: dict[str, Any]) -> str:
     return f"_{text}-{digest}"
 
 
+def model_tag(model: str) -> str:
+    """Default name for a model's evaluation folder. Folders the framework writes inside a run
+    (SFT's `merged`, GRPO's `last`) are named after their run, so different runs never share one:
+    checkpoints/x_teacher/merged -> x_teacher-merged; Qwen/Qwen3-0.6B -> Qwen3-0.6B."""
+    p = Path(model.rstrip("/\\"))
+    return f"{p.parent.name}-{p.name}" if p.name in ("merged", "last") and p.parent.name else p.name
+
+
 def template_args(pairs: list[str] | None, no_think: bool = False) -> dict[str, Any]:
     """--template-arg KEY=VALUE options for the chat template; --no-think is enable_thinking=false."""
     kwargs = {}
@@ -130,7 +138,7 @@ def cmd_sft(a: argparse.Namespace) -> None:
 def cmd_eval(a: argparse.Namespace) -> None:
     task = load_task(a.task, a.task_arg)
     examples = subsample(task.load_examples(a.split), a.n, a.seed)
-    out = Path(a.out or f"results/{task.name}/eval/{a.tag or Path(a.model).name}")
+    out = Path(a.out or f"results/{task.name}/eval/{a.tag or model_tag(a.model)}")
     gen: dict[str, Any] = {"max_new_tokens": a.max_new_tokens, "batch_size": a.batch}
     template_kwargs = template_args(a.template_arg, a.no_think)
     # only when set: tasks that override evaluate() need not accept these

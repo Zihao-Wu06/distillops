@@ -453,3 +453,14 @@ def test_grpo_disk_estimate():
     assert grpo_disk_bytes(p, lora=False, args=a, validation=True) == (4 + 2 * 4) * p  # checkpoint, best, last
     assert grpo_disk_bytes(p, lora=True, args=a, validation=True, start_bytes=4 * p) == 4 * p  # fp32 start copy
     assert grpo_disk_bytes(p, lora=True, args=a, validation=False) == 0
+
+
+def test_eval_folders_of_different_runs_do_not_collide():
+    from distillops.cli import model_tag
+
+    assert model_tag("checkpoints/gsm8k_0.6b_teacher/merged") == "gsm8k_0.6b_teacher-merged"
+    assert model_tag("checkpoints/gsm8k_0.6b_human/merged/") == "gsm8k_0.6b_human-merged"
+    assert model_tag("checkpoints/run/last") == "run-last"
+    assert model_tag("checkpoints/gsm8k_0.6b_grpo") == "gsm8k_0.6b_grpo"
+    assert model_tag("Qwen/Qwen3-0.6B") == "Qwen3-0.6B"
+    assert model_tag("merged") == "merged"

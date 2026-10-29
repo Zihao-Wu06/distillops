@@ -67,7 +67,7 @@ and the GRPO reward, so reinforcement learning optimises exactly what you report
 - **Runs on the GPU you have.** Precision is chosen from the hardware, batch sizes from free memory and
   the model's size, and disk space is checked before training; `doctor` reports all of it.
 - **Example results.** GSM8K: a 0.6B student goes from 62.4% to **66.8%** (teacher reasoning beats
-  human-written solutions by 13.5 points; 3.76 CNY of teacher calls). Recommendation: a fine-tuned 1.7B
+  human-written solutions by 13.5 points; 3.79 CNY of teacher calls). Recommendation: a fine-tuned 1.7B
   model distilled into two ~0.5M-parameter SASRecs reaches **HR@10 .164 / NDCG@10 .119**, on par with
   recent LLM recommenders at ~1/1,500 of their serving size.
 
@@ -153,8 +153,8 @@ python -m distillops grpo configs/grpo_gsm8k_qwen3_0.6b.yaml --task $T \
 python -m distillops eval    --task $T --model checkpoints/gsm8k_0.6b_grpo           # 66.8%
 python -m distillops cost    --teacher $TEACHER                                     # teacher spend so far
 ```
-The included results used DeepSeek as the teacher (`configs/teacher_deepseek.yaml`); the full GSM8K
-teacher run cost 3.76 CNY.
+The included results used DeepSeek as the teacher (`configs/teacher_deepseek.yaml`); the GSM8K
+teacher calls cost 3.79 CNY (3.74 for the full run, 0.05 for the 100-problem smoke test).
 
 ## Add your own task
 A complete task: support tickets classified into a fixed label set, with the teacher explaining its
@@ -341,7 +341,7 @@ optimizer state and every checkpoint); disk space for what will be written is ch
 | `teacher` | `results/<task>/teacher_<split>_n<n>[_<task args>]/`: `run.json` (teacher and task settings), `accepted.jsonl` (SFT rows), `log.jsonl` (every attempt and verdict; reruns resume from it), `stats.json` (yield, rejection reasons, tokens, cost) |
 | `labels` | `data/sft/<task>/labels_<split>_n<n>[_<task args>].jsonl` |
 | `sft` | `output_dir/` (adapter), `output_dir/merged/` (merged model), `sft_summary.json` |
-| `eval` | `results/<task>/eval/<tag>/metrics.json` and `predictions.jsonl` (every completion and its score) |
+| `eval` | `results/<task>/eval/<tag>/metrics.json` and `predictions.jsonl` (every completion and its score); `<tag>` defaults to the model folder's name (`<run>-merged` for an SFT model) |
 | `grpo --filter-only` | `output_dir/pass_rate_filter.json` (statistics and advice), `output_dir/pass_rate_kept.txt` |
 | `grpo` | `output_dir/` = **best model on validation** (a copy of the start model if nothing beat it), `output_dir/last/` = final model, `output_dir/validation.json` (scores per check, best step, weight change, entropy stop) |
 
@@ -390,7 +390,7 @@ and is not needed to use the framework on your own task.
 | **SFT on DeepSeek reasoning (rejection-sampled)** | **62.5%** |
 | **+ GRPO (1 epoch, reward = `Task.score`)** | **66.8%** |
 
-Teacher: DeepSeek Flash, 7,286 of 7,473 problems accepted (97.5%), **3.76 CNY**. Reasoning is essential
+Teacher: DeepSeek Flash, 7,274 of 7,473 problems accepted (97.3%), **3.79 CNY**. Reasoning is essential
 (answers only: 13.6%) and the teacher's verified, explicit steps beat human solutions by 13.5 points.
 SFT alone matches the untrained model (which its makers had already distilled on math); GRPO on top of
 the SFT checkpoint adds **+4.3 points** (paired: p < 1e-5 vs SFT, p ≈ 1e-3 vs untrained). 64.7% of
