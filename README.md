@@ -381,6 +381,7 @@ and is not needed to use the framework on your own task.
 | Model | Accuracy |
 |---|---|
 | Qwen3-1.7B-Base, untrained (zero-shot, plain prompt) | 73.8% |
+| + SFT on GSM8K's human solutions (same problems and settings, no teacher) | 68.5% |
 | **+ SFT on DeepSeek reasoning (rejection-sampled, full fine-tuning)** | **80.1%** |
 | **+ GRPO (1 epoch, reward = `Task.score`)** | **81.6%** |
 | *Qwen3-1.7B: Qwen's own post-trained model, for reference* | *80.2%* |
@@ -391,6 +392,9 @@ the 1,319 problems: SFT adds **+6.3 points** (95% CI +3.9 to +8.6, p < 1e-6) and
 verifier as reward **+1.6** more (+0.2 to +3.1, p = 0.046); the result is on par with Qwen's post-trained
 Qwen3-1.7B (+1.4, CI -0.8 to +3.6, p = 0.24). Before GRPO, 40.7% of training prompts carried a learning
 signal (57.3% were always solved); GRPO ran 96 steps and token entropy went 0.19 -> 0.15 (no collapse).
+The no-teacher control (`labels --task-arg label_reasoning=human`, same 7,274 problems, same SFT
+settings) scores 68.5%, below the untrained model; the teacher's reasoning beats it by **+11.6 points**
+(+9.1 to +14.3, p < 1e-17), so the gain comes from the teacher, not from training on GSM8K problems.
 Training is not bit-for-bit repeatable on GPUs: an earlier run of the same route gave 78.5% / 80.4%
 (no significant difference from these numbers).
 
@@ -436,7 +440,8 @@ standard fix and is not yet measured.
    base model +6.3 points and GRPO with the same verifier as reward +1.6 more, matching Qwen's own
    post-trained model of the same size.
 2. Always compare against a same-data, no-teacher control (`python -m distillops labels`), not just the
-   untrained model, to see what the teacher itself contributes.
+   untrained model, to see what the teacher itself contributes: on GSM8K, SFT on the human solutions of
+   the same problems lowered the score (73.8% -> 68.5%) while the teacher's reasoning raised it (80.1%).
 3. For latency-bound products, use the LLM as an offline teacher: item embeddings plus soft labels lifted
    SASRec by 22-24% HR@10, and a two-stage recall + re-rank matched recent LLM recommenders, at
    unchanged serving cost.
