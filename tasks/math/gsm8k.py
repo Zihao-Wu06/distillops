@@ -65,21 +65,30 @@ def _format_number(x: float) -> str:
 
 
 class GSM8KTask(Task):
-    def __init__(self, max_words: int = 250, label_reasoning: str = "none") -> None:
+    def __init__(self, max_words: int = 250, label_reasoning: str = "none", valid_size: int = 0) -> None:
+        """valid_size > 0 sets the last `valid_size` training problems apart as split "valid" (and
+        removes them from "train"), so GRPO can select checkpoints on problems SFT never saw."""
         assert label_reasoning in ("none", "human")
+        assert valid_size >= 0
         self.max_words = max_words
         self.label_reasoning = label_reasoning
+        self.valid_size = valid_size
         self.name = "gsm8k"
 
     # ---------------------------------------------------------------- data --
     def load_examples(self, split: str) -> list[MathExample]:
         from datasets import load_dataset
 
-        ds = load_dataset("openai/gsm8k", "main", split=split)
+        source = "train" if split == "valid" and self.valid_size else split
+        ds = load_dataset("openai/gsm8k", "main", split=source)
         out = []
         for i, r in enumerate(ds):
             solution, _, gold = r["answer"].rpartition("####")
-            out.append(MathExample(f"gsm8k:{split}:{i}", r["question"], solution.strip(), gold.strip().replace(",", "")))
+            out.append(MathExample(f"gsm8k:{source}:{i}", r["question"], solution.strip(), gold.strip().replace(",", "")))
+        if self.valid_size and source == "train":  # ids keep their train index, so logs and caches still match
+            if self.valid_size >= len(out):
+                raise ValueError(f"valid_size={self.valid_size} leaves no training problems")
+            return out[-self.valid_size:] if split == "valid" else out[:-self.valid_size]
         return out
 
     def example_id(self, ex: MathExample) -> str:

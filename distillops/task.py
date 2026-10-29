@@ -109,3 +109,23 @@ def check_ids(task: Any, examples: Sequence[Any]) -> list[str]:
         first[eid] = i
         ids.append(eid)
     return ids
+
+
+TRAINED_IDS = "trained_ids.txt"  # saved next to a model: the example ids it was trained on
+
+
+def read_trained_ids(model_dir: str | Path) -> set[str] | None:
+    """Ids of the examples a model saved by distillops was trained on (SFT rows, GRPO prompts), or
+    None when the folder has no record (e.g. a hub model, or rows without ids)."""
+    path = Path(model_dir) / TRAINED_IDS
+    if not path.is_file():
+        return None
+    return {line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()}
+
+
+def write_trained_ids(model_dir: str | Path, ids: Any) -> None:
+    path = Path(model_dir)
+    if not (path / "config.json").exists() and not (path / "adapter_config.json").exists():
+        return  # not a saved model folder
+    (path / TRAINED_IDS).write_text("".join(f"{i}\n" for i in sorted(set(ids))), encoding="utf-8")
+

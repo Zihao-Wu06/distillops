@@ -154,7 +154,15 @@ def cmd_labels(a: argparse.Namespace) -> None:
     task = load_task(a.task, a.task_arg)
     examples = subsample(task.load_examples(a.split), a.n, a.seed)
     out = Path(a.out or f"data/sft/{task.name}/labels_{a.split}_n{a.n}{args_suffix(kwargs)}.jsonl")
-    print(f"{write_jsonl(out, (task.gold_sft_example(ex) for ex in examples))} rows -> {out}")
+    from .task import check_ids
+
+    def row(ex: Any, eid: str) -> dict:
+        r = task.gold_sft_example(ex)
+        r["meta"] = {**(r.get("meta") or {}), "id": eid, "task": task.name}  # SFT records what a model saw
+        return r
+
+    rows = (row(ex, eid) for ex, eid in zip(examples, check_ids(task, examples)))
+    print(f"{write_jsonl(out, rows)} rows -> {out}")
 
 
 def cmd_sft(a: argparse.Namespace) -> None:
@@ -220,9 +228,23 @@ def cmd_grpo(a: argparse.Namespace) -> None:
     examples = subsample(_exclude(task, split, a.exclude), a.n, a.seed)
     valid: list = []
     if cfg.eval_every > 0 and cfg.eval_examples > 0 and not a.filter_only:
-        # chosen before --keep-ids / filtering, deterministically, so held-out prompts never reach training
-        examples, valid, source = split_validation(task, examples, cfg.eval_examples, a.seed)
-        print(f"validation: {len(valid)} prompts ({source}), checked every {cfg.eval_every} steps", flush=True)
+        from .task import read_trained_ids
+
+        # chosen before --keep-ids / filtering, deterministically, so held-out prompts never reach training;
+        # prompts the start model was fine-tuned on are never used (their scores measure recall)
+        trained = read_trained_ids(cfg.model)
+        if trained is None and Path(cfg.model).is_dir():
+            print(f"WARNING: {cfg.model} has no record of the examples it was trained on (trained_ids.txt: made by an "
+                  "older version, or from rows without meta.id), so validation may contain prompts it learned and "
+                  "pick the wrong checkpoint. Pass --exclude <its SFT data .jsonl>, or give the task a 'valid' split "
+                  "SFT did not use.", flush=True)
+        examples, valid, source = split_validation(task, examples, cfg.eval_examples, a.seed, exclude_ids=trained)
+        if valid:
+            print(f"validation: {len(valid)} prompts ({source}), checked every {cfg.eval_every} steps", flush=True)
+        else:
+            print(f"WARNING: no validation ({source}), so checkpoint selection is off and output_dir will hold the "
+                  "final model. For selection, give the task a 'valid' split that SFT did not use (e.g. "
+                  "--task-arg valid_size=500 for GSM8K, then rebuild the SFT data).", flush=True)
     if a.keep_ids:  # prompts kept by an earlier --filter-only run
         keep = {line.strip() for line in Path(a.keep_ids).read_text(encoding="utf-8").splitlines() if line.strip()}
         examples = [ex for ex in examples if task.example_id(ex) in keep]
@@ -272,8 +294,12 @@ def cmd_merge(a: argparse.Namespace) -> None:
     tok = AutoTokenizer.from_pretrained(a.adapter)
     tok.save_pretrained(a.out)
     from .chat import save_stop_tokens
+    from .task import read_trained_ids, write_trained_ids
 
     save_stop_tokens(a.out, tok)
+    ids = read_trained_ids(a.adapter)
+    if ids is not None:  # keep the record of what the model saw, for GRPO's validation
+        write_trained_ids(a.out, ids)
     print(f"merged {a.adapter} into {a.base} -> {a.out}")
 
 

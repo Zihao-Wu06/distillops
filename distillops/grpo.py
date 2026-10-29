@@ -274,34 +274,50 @@ def entropy_guard(floor_ratio: float, patience: int):
     return EntropyGuard()
 
 
-def split_validation(task: Any, examples: Sequence[Any], n: int, seed: int = 0) -> tuple[list[Any], list[Any], str]:
+def split_validation(task: Any, examples: Sequence[Any], n: int, seed: int = 0,
+                     exclude_ids: set[str] | None = None) -> tuple[list[Any], list[Any], str]:
     """(training examples, validation examples, source). Uses the task's "valid" split when it
-    exists; otherwise holds `n` examples out of `examples` and removes them from training."""
+    exists; otherwise holds `n` examples out of `examples` and removes them from training.
+    `exclude_ids`: examples the start model was trained on. They are never used for validation:
+    a model scores high on prompts it has learned the answers to, so such a score cannot show
+    whether GRPO helps (validation leakage). With none left, validation is off ("none: ...")."""
     import random
 
     if n <= 0:
         return list(examples), [], "none"
+    seen = exclude_ids or set()
     try:
         valid = list(task.load_examples("valid"))
     except Exception:  # most tasks without a validation split raise here (e.g. datasets: unknown split)
         valid = []
     if valid:
-        pick = random.Random(seed).sample(valid, min(n, len(valid)))
-        return list(examples), pick, "valid split"
-    if len(examples) < 2:
-        return list(examples), [], "none"
-    k = min(n, len(examples) // 5)  # never hold out more than 20% of the training prompts
-    held = set(random.Random(seed + 1).sample(range(len(examples)), k))
+        unseen = [ex for ex in valid if task.example_id(ex) not in seen]
+        if not unseen:
+            return list(examples), [], "none: every prompt of the valid split was in the start model's training data"
+        pick = random.Random(seed).sample(unseen, min(n, len(unseen)))
+        note = f", {len(valid) - len(unseen)} seen in training left out" if len(unseen) < len(valid) else ""
+        return list(examples), pick, f"valid split{note}"
+    candidates = [i for i, ex in enumerate(examples) if task.example_id(ex) not in seen]
+    if len(examples) < 2 or not candidates:
+        reason = ("every prompt was in the start model's training data" if len(examples) >= 2 and seen
+                  else "too few prompts")
+        return list(examples), [], f"none: {reason}"
+    k = min(n, len(examples) // 5, len(candidates))  # never hold out more than 20% of the training prompts
+    held = set(random.Random(seed + 1).sample(candidates, k))
+    note = (" (prompts the start model was trained on left out; the rest, e.g. ones the teacher failed, may be "
+            "harder than average: a 'valid' split is more representative)") if len(candidates) < len(examples) else ""
     return ([ex for i, ex in enumerate(examples) if i not in held],
-            [ex for i, ex in enumerate(examples) if i in held], "held out of training")
+            [ex for i, ex in enumerate(examples) if i in held], f"held out of training{note}")
 
 
 def make_evaluator(task: Any, examples: Sequence[Any], max_new_tokens: int,
-                   render: Callable[[list[dict]], str] | None = None, batch_size: int = 0) -> Callable[[Any, Any], float]:
-    """Returns evaluate(model, tokenizer) -> mean Task.score of greedy completions on `examples`.
-    Runs on the model being trained (no extra copy); switches it to eval mode and back."""
+                   render: Callable[[list[dict]], str] | None = None,
+                   batch_size: int = 0) -> Callable[[Any, Any], tuple[float, float]]:
+    """Returns evaluate(model, tokenizer) -> (mean Task.score of greedy completions on `examples`,
+    its standard error). Runs on the model being trained (no extra copy); switches it to eval mode
+    and back."""
 
-    def evaluate(model: Any, tok: Any) -> float:
+    def evaluate(model: Any, tok: Any) -> tuple[float, float]:
         import torch
 
         from .chat import stop_token_ids
@@ -347,9 +363,20 @@ def make_evaluator(task: Any, examples: Sequence[Any], max_new_tokens: int,
                 model.train()
             if use_amp:  # give generation's cached blocks back before training resumes (fragmentation)
                 torch.cuda.empty_cache()
-        return sum(float(task.score(ex, c)) for ex, c in zip(examples, outs)) / max(len(examples), 1)
+        scores = [float(task.score(ex, c)) for ex, c in zip(examples, outs)]
+        return mean_and_se(scores)
 
     return evaluate
+
+
+def mean_and_se(scores: Sequence[float]) -> tuple[float, float]:
+    """Mean and its standard error: differences between checks smaller than ~2 SE are noise."""
+    n = len(scores)
+    if not n:
+        return 0.0, 0.0
+    mean = sum(scores) / n
+    var = sum((s - mean) ** 2 for s in scores) / (n - 1) if n > 1 else 0.0
+    return mean, (var / n) ** 0.5
 
 
 def validation_selector(evaluate: Callable[[Any], float], every: int, patience: int, save_best: Callable[[], None]):
@@ -367,7 +394,8 @@ def validation_selector(evaluate: Callable[[Any], float], every: int, patience: 
         def _check(self, step: int, model: Any) -> None:
             if self.history and self.history[-1][0] == step:  # already scored this step
                 return
-            score = evaluate(model)
+            result = evaluate(model)
+            score, se = result if isinstance(result, tuple) else (result, None)
             self.history.append((step, score))
             if self.best is None or score > self.best:
                 self.best, self.best_step, self.bad = score, step, 0
@@ -377,7 +405,8 @@ def validation_selector(evaluate: Callable[[Any], float], every: int, patience: 
             else:
                 self.bad += 1
                 note = f"no improvement ({self.bad} in a row; best {self.best:.4f} at step {self.best_step})"
-            print(f"validation score at step {step}: {score:.4f} -- {note}", flush=True)
+            spread = f" ± {se:.4f}" if se is not None else ""
+            print(f"validation score at step {step}: {score:.4f}{spread} -- {note}", flush=True)
 
         def on_train_begin(self, args, state, control, model=None, **kwargs):
             if every > 0:
@@ -558,10 +587,19 @@ def train(
     out = {"train_loss": result.training_loss, "rows": len(rows), "weight_change": change,
            "steps": result.global_step, "stopped_for_entropy_collapse_at": guard.stopped_at}
     main = trainer.is_world_process_zero()  # one process writes files under a multi-process launch
+    from .task import read_trained_ids, write_trained_ids
+
+    start_ids = read_trained_ids(cfg.model)
+    if start_ids is None and not Path(cfg.model).is_dir():
+        start_ids = set()  # a hub model: not trained on this task's rows by distillops
+    # what the trained model has seen; unknown (None) when the start model's own record is missing
+    trained_ids = None if start_ids is None else start_ids | {str(r["ex_id"]) for r in rows if "ex_id" in r}
     if selector is None:
         trainer.save_model(cfg.output_dir)
         if main:
             save_stop_tokens(cfg.output_dir, tok)
+            if trained_ids is not None:
+                write_trained_ids(cfg.output_dir, trained_ids)
         return out
     # output_dir holds the best model; the last one goes to output_dir/last for reference
     trainer.save_model(str(Path(cfg.output_dir) / "last"))
@@ -579,6 +617,9 @@ def train(
     for d in (cfg.output_dir, Path(cfg.output_dir) / "last"):
         if main:
             save_stop_tokens(d, tok)
+    if main and trained_ids is not None:  # output_dir holds the start model when nothing beat it
+        write_trained_ids(Path(cfg.output_dir) / "last", trained_ids)
+        write_trained_ids(cfg.output_dir, start_ids if selector.best_step == 0 else trained_ids)
     out.update({"validation_history": selector.history, "best_step": selector.best_step,
                 "best_validation_score": selector.best, "validation_note": note})
     Path(cfg.output_dir).mkdir(parents=True, exist_ok=True)

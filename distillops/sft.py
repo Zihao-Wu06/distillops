@@ -58,7 +58,7 @@ def _load_rows(path: str) -> list[dict]:
         return [json.loads(l) for l in f if l.strip()]
 
 
-def length_filter(rows: list[dict], tokenizer, max_length: int) -> tuple[list[dict], dict]:
+def length_filter(rows: list[dict], tokenizer, max_length: int, ids_out: list | None = None) -> tuple[list[dict], dict]:
     """Drop rows whose prompt+completion exceed max_length tokens (never truncate). Also counts rows
     whose prompt tokens are not a prefix of prompt+completion tokens (the completion's first token
     merged with the prompt's last one): there the loss mask is off by a token."""
@@ -70,6 +70,8 @@ def length_filter(rows: list[dict], tokenizer, max_length: int) -> tuple[list[di
         lengths.append(len(ids))
         if len(ids) <= max_length:
             kept.append({"prompt": r["prompt"], "completion": r["completion"]})
+            if ids_out is not None:
+                ids_out.append((r.get("meta") or {}).get("id"))
     lengths.sort()
     stats = {
         "rows_in": len(rows),
@@ -174,7 +176,8 @@ def train(cfg: SFTRunConfig) -> dict:
     from .chat import load_tokenizer
 
     tok = load_tokenizer(cfg.model, cfg.chat_template)
-    rows, len_stats = length_filter(_load_rows(cfg.train_file), tok, cfg.max_length)
+    kept_ids: list = []
+    rows, len_stats = length_filter(_load_rows(cfg.train_file), tok, cfg.max_length, kept_ids)
     print("length filter:", len_stats)
     _require_rows(len_stats, cfg.train_file, cfg.max_length)
     if len_stats["prompt_boundary_mismatch"]:
@@ -246,11 +249,23 @@ def train(cfg: SFTRunConfig) -> dict:
     from .chat import save_stop_tokens
 
     main = trainer.is_world_process_zero()  # one process writes files under a multi-process launch
+    from .task import write_trained_ids
+
+    # which examples this model has seen, so GRPO does not validate on them (rows from `teacher` and
+    # `labels` carry meta.id); recorded only when every kept row has one
+    known = all(i is not None for i in kept_ids)
+    if not known:
+        print("note: some training rows have no meta.id, so the trained examples are not recorded; GRPO cannot "
+              "keep them out of its validation prompts", flush=True)
     if main:
         save_stop_tokens(cfg.output_dir, tok)  # full fine-tuning: the model itself (an adapter folder is skipped)
+        if known:
+            write_trained_ids(cfg.output_dir, [str(i) for i in kept_ids])
     if cfg.lora and main:  # merged copy so evaluation/serving can load a plain HF model
         merged = trainer.model.merge_and_unload()
         merged.save_pretrained(Path(cfg.output_dir) / "merged")
         tok.save_pretrained(Path(cfg.output_dir) / "merged")
         save_stop_tokens(Path(cfg.output_dir) / "merged", tok)
+        if known:
+            write_trained_ids(Path(cfg.output_dir) / "merged", [str(i) for i in kept_ids])
     return {"length_filter": len_stats, "train_loss": result.training_loss}
