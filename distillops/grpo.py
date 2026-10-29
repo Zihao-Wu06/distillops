@@ -167,10 +167,10 @@ def fit_micro_batch(cfg: "GRPORunConfig", total_bytes: int | None = None, vocab:
     """Largest per-device batch (completions) whose loss-time logits fit in memory, with gradient
     accumulation raised so batch x accumulation, and therefore the optimisation, stays unchanged.
 
-    The loss needs fp32 logits over the vocabulary for every completion token (plus a log-softmax
-    copy): completions x max_completion_length x vocab x 8 bytes. 64 math solutions of 512 tokens
-    need ~20GB; 64 product titles of 96 tokens need ~4GB, so a fixed batch fits one task and not
-    the other."""
+    The loss needs fp32 values over the vocabulary for every completion token, three times over: the
+    logits, their log-softmax, and the logits' gradient in the backward pass: completions x
+    max_completion_length x vocab x 12 bytes. 64 math solutions of 512 tokens need ~60GB; 64 product
+    titles of 96 tokens ~11GB, so a fixed batch fits one task and not the other."""
     total = cfg.batch_size * cfg.grad_accum
     if total_bytes is None or vocab is None or train_state_bytes is None:
         try:
@@ -200,7 +200,7 @@ def fit_micro_batch(cfg: "GRPORunConfig", total_bytes: int | None = None, vocab:
               f"share ({vllm:.0%}) on this {total_bytes / 2**30:.0f} GB GPU. Options: lora: true, a smaller model, "
               "or a lower vllm_gpu_memory_utilization.", flush=True)
     budget = 0.5 * free_for_training  # half for logits, half for activations
-    per_completion = cfg.max_completion_length * vocab * 8
+    per_completion = cfg.max_completion_length * vocab * 12  # fp32 logits, log-softmax and their gradient
     cap = max(1, int(budget // per_completion))
     batch = max(d for d in range(1, total + 1) if total % d == 0 and d <= max(cap, 1))
     batch = min(batch, cfg.batch_size)
@@ -345,6 +345,8 @@ def make_evaluator(task: Any, examples: Sequence[Any], max_new_tokens: int,
             tok.padding_side = old_side
             if was_training:
                 model.train()
+            if use_amp:  # give generation's cached blocks back before training resumes (fragmentation)
+                torch.cuda.empty_cache()
         return sum(float(task.score(ex, c)) for ex, c in zip(examples, outs)) / max(len(examples), 1)
 
     return evaluate
