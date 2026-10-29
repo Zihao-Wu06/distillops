@@ -175,11 +175,15 @@ def test_sft_warmup_field_depends_on_transformers_version():
 
 def test_trainer_configs_accept_overrides_of_framework_arguments():
     trl = pytest.importorskip("trl")
+    from distillops.precision import train_settings
     from distillops.trainargs import merge_extra
 
+    prec = train_settings(full_finetune=True)  # as sft/grpo pass it (a CPU-only machine must not get bf16)
+    own = {"output_dir": "o", "report_to": "none", "gradient_checkpointing": True,
+           "bf16": prec["bf16"], "fp16": prec["fp16"], "use_cpu": prec["use_cpu"]}
     for cls in (trl.SFTConfig, trl.GRPOConfig):  # the framework's own keys plus a user override build fine
-        cls(**merge_extra({"output_dir": "o", "report_to": "none", "gradient_checkpointing": True},
-                          {"report_to": [], "gradient_checkpointing": False, "lr_scheduler_type": "linear"}, {}, "x"))
+        cls(**merge_extra(own, {"report_to": [], "gradient_checkpointing": False, "lr_scheduler_type": "linear"},
+                          {}, "x"))
 
 
 def test_grpo_lora_settings_are_configurable():
