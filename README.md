@@ -74,7 +74,7 @@ and the GRPO reward, so reinforcement learning optimises exactly what you report
 ## Contents
 [Install](#install) · [Hardware](#hardware) · [Quick start](#quick-start) · [Add your own task](#add-your-own-task) ·
 [Commands](#commands) · [Configuration](#configuration) · [Outputs](#outputs) ·
-[What the framework handles](#what-the-framework-handles) · [Safeguards](#safeguards) ·
+[What the framework handles](#what-the-framework-handles) ·
 [Included examples and results](#included-examples-and-results) · [Related work](#related-work) · [Layout](#layout)
 
 ## Install
@@ -359,25 +359,6 @@ optimizer state and every checkpoint); disk space for what will be written is ch
   the GPU, batch sizes from free memory and the model's KV-cache size, disk checked before training.
 - **Model-agnostic** (`distillops/chat.py`, `memory.py`): any causal LM; a chat template for models
   without one, and config sizes read under each architecture's field names.
-
-## Safeguards
-Each one comes from a real failure.
-
-| Silent failure | Guard in the framework |
-|---|---|
-| bf16 weights round lr-1e-6 updates away: training curves rise but the model does not change | fp32 master weights for full fine-tuning; after training, the relative weight change is checked against a floor derived from lr and steps |
-| Hard-coded bf16 breaks on GPUs without bf16, and torch reports bf16 as supported where it is only emulated (T4, V100: slow) | `precision.compute_dtype()`: bf16 only where native (compute capability 8.0+ or ROCm), else fp16, else fp32, used everywhere |
-| Windows spills VRAM to system RAM instead of raising OOM (10-100x slower) | batch sizes from free memory and the model's KV-cache size; halve automatically when a batch peaks above 85% |
-| Loss-time logits grow with completion length (long math solutions ran out of memory, short titles did not) | GRPO micro-batch sized from completion length, vocabulary and memory, with accumulation raised to keep the effective batch |
-| Checkpoints with optimizer state fill the disk at the final save | weights-only checkpoints, one kept; refuse to start if the disk cannot hold the run |
-| vLLM starts after the model has loaded and only then finds its reserved share of the GPU unavailable | free memory checked first; the error names the setting to lower |
-| GRPO on prompts whose samples all score the same (always right, always wrong, or the same partial credit) learns nothing | pass-rate filter keeps prompts whose samples differ, with plain-language advice; `--epochs` sizes the run to the kept prompts |
-| Rerunning `teacher` with another teacher, task setting, teacher prompt or task code into the same folder mixes two runs (finished examples are skipped) | each run folder records its settings and hashes of the prompt and task code in `run.json`, a mismatch stops the run; task arguments are part of default paths |
-| A local error (e.g. an outdated package) is retried like a network error and every example is marked failed | only network errors, timeouts, 408/409/429 and 5xx are retried; other HTTP errors are recorded for that request; a local error or a wrong key, permission or model (401/403/404) stops the run at once with the cause, before any further request |
-| A task whose ids are numbers never matches the ids read back from files (`--keep-ids` would keep nothing) | ids must be non-empty, unique strings, checked before any run; ids read from files are compared as text |
-| GRPO entropy collapse: the policy memorises one answer per prompt | stop when entropy stays below 10% of the run's own starting value (relative, so no task-specific threshold) |
-| Training reward rises while held-out quality falls | validation-based checkpoint selection; `output_dir` keeps the best model, or the start model if nothing beats it |
-| Code that only fits one model family: gpt2 names its layer count `n_layer`, base models have no chat template, and without CUDA transformers trains on Apple's MPS, where gpt2's attention dropout fails | sizes read under each architecture's config names; a plain chat template saved with the model; CPU training when there is no CUDA GPU |
 
 ## Included examples and results
 The two example tasks exist to show the workflow and what it achieves; their code lives in `tasks/`
