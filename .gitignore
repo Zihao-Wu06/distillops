@@ -13,3 +13,4 @@ checkpoints/
 logs/
 # maintainer-only notes and machine scripts, never published
 _local/
+docs/

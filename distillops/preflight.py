@@ -1,4 +1,4 @@
-"""Checks that fail fast, before hours of GPU time (see docs/PITFALLS.md).
+"""Checks that fail fast, before hours of GPU time.
 
     python -m distillops doctor      # environment report: GPU, precision, memory, disk, versions
 """

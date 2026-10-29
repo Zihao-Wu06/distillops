@@ -1,6 +1,6 @@
 """Numeric precision in one place, chosen from the hardware instead of hard-coded.
 
-Rules (each one learned the hard way, see docs/PITFALLS.md):
+Rules (each one learned the hard way):
 - Compute dtype: bf16 if the GPU supports it (Ampere and newer), else fp16, else fp32 (CPU).
 - Full fine-tuning keeps fp32 *master* weights and computes in the low-precision dtype
   (mixed precision). Training bf16 weights directly loses small updates: with lr 1e-6 an

@@ -324,7 +324,7 @@ With LoRA, a merged copy is saved to `output_dir/merged` for evaluation and serv
   without one, and config sizes read under each architecture's field names.
 
 ## Safeguards
-Each one comes from a real failure; [docs/PITFALLS.md](docs/PITFALLS.md) has the details.
+Each one comes from a real failure.
 
 | Silent failure | Guard in the framework |
 |---|---|
@@ -456,7 +456,6 @@ tasks/            the two included example tasks (not needed for your own):
 scripts/          check_task.py (any task); rec_*.py: the recommendation example (prepare, SASRec sweep,
                   build SFT data, LLM / SASRec eval, paired comparison, SASRec distillation, two-stage)
 configs/          teacher, SFT and GRPO configs (example settings)
-docs/PITFALLS.md  every silent failure met so far, its cause and the guard now in code
 tests/            unit tests; no network or GPU needed
 ```
 `data/`, `results/`, `checkpoints/` and `cache/` are created at run time and not tracked.
