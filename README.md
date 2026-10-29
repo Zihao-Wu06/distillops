@@ -58,16 +58,18 @@ and the GRPO reward, so reinforcement learning optimises exactly what you report
 - **Any verifiable task, one class.** Teacher calls, rejection sampling, SFT, evaluation and GRPO are
   shared; a task only supplies data, prompts, a verifier and a score.
 - **Any student model.** Any causal LM from the Hugging Face hub or a local path can be the student
-  (Qwen, Llama, Mistral, Gemma, Phi, GPT-2, ...), including base models without a chat template.
+  (Qwen, Llama, Mistral, Gemma, Phi, GPT-2, ...), including base models, with or without a chat
+  template of their own.
 - **Verified data, measured value.** Teacher outputs are kept only if they pass your verifier (failed
   examples are retried), and a no-teacher control (`labels`) shows what the teacher actually adds.
 - **RL that tells you when it will not work.** Before GRPO, the share of prompts that carry a learning
-  signal is measured and explained; during and after it, validation picks the best checkpoint, an
-  entropy guard stops collapse, and a weight-change check catches updates that never landed.
+  signal is measured and explained; during and after it, validation on prompts the model never trained
+  on picks the best checkpoint, an entropy guard stops collapse, and a weight-change check catches
+  updates that never landed.
 - **Runs on the GPU you have.** Precision is chosen from the hardware, batch sizes from free memory and
   the model's size, and disk space is checked before training; `doctor` reports all of it.
-- **Example results.** GSM8K: a 0.6B student goes from 62.4% to **66.8%** (teacher reasoning beats
-  human-written solutions by 13.5 points; 3.79 CNY of teacher calls). Recommendation: a fine-tuned 1.7B
+- **Example results.** GSM8K: 3.79 CNY of teacher calls take a base model (Qwen3-1.7B-Base) from 73.8%
+  to **80.4%**, level with Qwen's own post-trained Qwen3-1.7B (80.2%). Recommendation: a fine-tuned 1.7B
   model distilled into two ~0.5M-parameter SASRecs reaches **HR@10 .164 / NDCG@10 .119**, on par with
   recent LLM recommenders at ~1/1,500 of their serving size.
 
@@ -89,7 +91,7 @@ Python 3.11-3.12. Tested on these setups:
 | Machine | Used for | torch | transformers | TRL | PEFT | vLLM |
 |---|---|---|---|---|---|---|
 | Windows 11, RTX 4090 24GB | teacher calls, SFT, evaluation, SASRec | 2.11 (cu128) | 5.21 | 1.16 | 0.21 | - |
-| Ubuntu 22.04, RTX 6000D 84GB | GRPO, pass-rate filter, SFT, evaluation | 2.8 (cu128) | 4.57.1 | 0.24 | 0.21 | 0.11.0 |
+| Ubuntu 22.04, RTX PRO 6000 96GB (and RTX 6000D 84GB) | GRPO, pass-rate filter, SFT, evaluation | 2.8 (cu128) | 4.57.1 | 0.24 | 0.21 | 0.11.0 |
 | macOS (Apple Silicon), CPU only | SFT, evaluation and GRPO without vLLM on non-Qwen students (gpt2, SmolLM2-135M-Instruct) | 2.15 | 4.57.1 | 0.24 | 0.21 | - |
 
 vLLM 0.11 needs transformers 4.x; pin `transformers==4.57.1 trl==0.24.0` next to it. The framework
@@ -131,30 +133,33 @@ cp configs/teacher_template.yaml configs/my_teacher.yaml       # then edit it fo
 export TEACHER_API_KEY=...                                      # the variable named by api_key_env
 T=tasks.math.gsm8k:GSM8KTask
 TEACHER=configs/my_teacher.yaml
+B=Qwen/Qwen3-1.7B-Base
 
-python -m distillops eval    --task $T --model Qwen/Qwen3-0.6B --no-think           # baseline: 62.4%
+python -m distillops eval    --task $T --model $B --chat-template plain             # baseline: 73.8%
 python -m distillops teacher --task $T --teacher $TEACHER --n 100                   # smoke test on 100 problems
 python -m distillops teacher --task $T --teacher $TEACHER                           # full train split
-python -m distillops sft     configs/sft_qwen3.yaml \
-         --train_file results/gsm8k/teacher_train_n0/accepted.jsonl --output_dir checkpoints/gsm8k_0.6b_teacher
-python -m distillops eval    --task $T --model checkpoints/gsm8k_0.6b_teacher/merged # 62.5%
-
-# no-teacher control: the same SFT on the dataset's human-written solutions
-python -m distillops labels  --task $T --task-arg label_reasoning=human --out data/sft/gsm8k/human.jsonl
-python -m distillops sft     configs/sft_qwen3.yaml \
-         --train_file data/sft/gsm8k/human.jsonl --output_dir checkpoints/gsm8k_0.6b_human
-python -m distillops eval    --task $T --model checkpoints/gsm8k_0.6b_human/merged   # 49.0%
-# (without --task-arg, labels writes answer-only rows: 13.6%)
+python -m distillops sft     configs/sft_qwen3_full.yaml                             # writes checkpoints/gsm8k_1.7b_base_teacher
+python -m distillops eval    --task $T --model checkpoints/gsm8k_1.7b_base_teacher   # 78.5%
 
 # GRPO (Linux + vLLM): measure the learning signal first, then train on the useful prompts
-python -m distillops grpo configs/grpo_gsm8k_qwen3_0.6b.yaml --task $T --filter-samples 8 --filter-only
-python -m distillops grpo configs/grpo_gsm8k_qwen3_0.6b.yaml --task $T \
-         --keep-ids checkpoints/gsm8k_0.6b_grpo/pass_rate_kept.txt --epochs 1
-python -m distillops eval    --task $T --model checkpoints/gsm8k_0.6b_grpo           # 66.8%
+python -m distillops grpo configs/grpo_gsm8k_qwen3_1.7b_base.yaml --task $T --filter-samples 8 --filter-only
+python -m distillops grpo configs/grpo_gsm8k_qwen3_1.7b_base.yaml --task $T \
+         --keep-ids checkpoints/gsm8k_1.7b_base_grpo/pass_rate_kept.txt --epochs 1
+python -m distillops eval    --task $T --model checkpoints/gsm8k_1.7b_base_grpo      # 80.4%
 python -m distillops usage   --teacher $TEACHER                                     # teacher calls and tokens
 ```
-The included results used DeepSeek as the teacher (`configs/teacher_deepseek.yaml`); the GSM8K
-teacher calls cost 3.79 CNY (3.74 for the full run, 0.05 for the 100-problem smoke test).
+- **Full fine-tuning, not LoRA:** the base model's chat-template tokens (`<|im_start|>`, `<|im_end|>`,
+  `<think>`) were never trained, and LoRA cannot learn embeddings; with LoRA, `sft` stops and says so.
+  Full fine-tuning of 1.7B parameters needs ~33 GB plus activations (and vLLM's share during GRPO);
+  the results were produced on a 96 GB GPU.
+- **Baseline:** a base model is scored with the `plain` template (it has not learned the chat format);
+  4-shot prompting scored lower (68.1%), so 73.8% is the baseline.
+- **GRPO validation:** SFT saw nearly every training problem, and the few it did not are ones the
+  teacher failed, so there is no representative validation set: the config sets `eval_every: 0` and
+  GRPO keeps its final model. To select checkpoints instead, set problems apart with
+  `--task-arg valid_size=500` on both `teacher` and `grpo`, and turn `eval_every` back on.
+- **Teacher:** the included results used DeepSeek (`configs/teacher_deepseek.yaml`); the GSM8K teacher
+  calls cost 3.79 CNY (3.74 for the full run, 0.05 for the 100-problem smoke test).
 
 ## Add your own task
 A complete task: support tickets classified into a fixed label set, with the teacher explaining its
@@ -284,6 +289,12 @@ results used it.
   so the model learns to stop; a notice says so. To choose another, set `chat_template` in the config
   or pass `--chat-template`: `plain`, a Jinja file, or a Jinja string. The template is saved with the
   trained model, so later commands use it without the option.
+- **Base models with a chat template.** A base model may ship a chat template whose special tokens it
+  never trained (Qwen3-Base: `<|im_start|>`, `<|im_end|>`, `<think>`). LoRA cannot learn those
+  embeddings, so `sft` stops with the options instead of training a model that never ends its reply;
+  use `lora: false` (`configs/sft_qwen3_full.yaml`). Generation stops at the template's end-of-turn
+  token as well as EOS, and both are written to the saved model's `generation_config.json`, so
+  transformers and vLLM stop there too.
 - **Template options** (`--template-arg KEY=VALUE`, `chat_template_kwargs` in the GRPO config;
   `--no-think` is `enable_thinking=false`) are passed to the template; templates that do not use
   them ignore them.
@@ -293,7 +304,7 @@ results used it.
 - **No CUDA GPU.** SFT, evaluation and GRPO with `use_vllm: false` run on the CPU (slow, but
   fine for small models); GRPO with vLLM and the pass-rate filter need a Linux GPU.
 
-### SFT (`configs/sft_qwen3.yaml`)
+### SFT (`configs/sft_qwen3.yaml` with LoRA; `configs/sft_qwen3_full.yaml` with full fine-tuning)
 | Field | Default | Meaning |
 |---|---|---|
 | `model`, `train_file`, `output_dir` | required | base model, JSONL of prompt/completion rows, where to write |
@@ -307,11 +318,13 @@ results used it.
 | `chat_template` | none | none = the model's own (plain if it has none); `plain`, a Jinja file or string ([Student model](#student-model)) |
 | `extra` | `{}` | any TRL `SFTConfig` argument, including ones the framework sets (`report_to`, `lr_scheduler_type`, `gradient_checkpointing`, ...; overrides are printed); arguments with a field above are set through that field |
 
-With LoRA, a merged copy is saved to `output_dir/merged` for evaluation and serving. Checkpoints hold
+With LoRA, a merged copy is saved to `output_dir/merged` for evaluation and serving. Each saved model
+gets `trained_ids.txt`, the ids of the rows it was trained on (rows from `teacher` and `labels` carry
+them), so GRPO never validates on them. Checkpoints hold
 weights only and one is kept (`extra: {save_only_model: false, save_total_limit: null}` keeps
 optimizer state and every checkpoint); disk space for what will be written is checked before training.
 
-### GRPO (`configs/grpo_gsm8k_qwen3_0.6b.yaml`)
+### GRPO (`configs/grpo_gsm8k_qwen3_1.7b_base.yaml`)
 | Field | Default | Meaning |
 |---|---|---|
 | `model`, `output_dir` | required | start checkpoint (the SFT model; `--model` overrides) and where to write |
@@ -328,7 +341,7 @@ optimizer state and every checkpoint); disk space for what will be written is ch
 | `chat_template` | none | as for SFT; a model trained with distillops already carries its template |
 | `chat_template_kwargs` | `{}` | e.g. `{enable_thinking: false}`; prompts are rendered by the framework, so this works with any TRL version |
 | `eval_every` | 25 | validation check every N steps (0 = off) |
-| `eval_examples` | 200 | validation prompts: the task's `valid` split if it has one, else held out of training (at most 20%) |
+| `eval_examples` | 200 | validation prompts: the task's `valid` split if it has one, else held out of training (at most 20%); never prompts the start model was trained on (its `trained_ids.txt`): with none left, selection is off and `output_dir` holds the final model; scores are printed with their standard error |
 | `eval_patience` | 0 | stop after N checks without improvement (0 = never stop early) |
 | `entropy_floor_ratio`, `entropy_patience` | 0.1, 2 | stop when entropy stays below 10% of its starting value for 2 logs (0 = off) |
 | `seed`, `logging_steps`, `save_steps` | 42, 5, 100 | |
@@ -339,10 +352,10 @@ optimizer state and every checkpoint); disk space for what will be written is ch
 |---|---|
 | `teacher` | `results/<task>/teacher_<split>_n<n>[_<task args>]/`: `run.json` (teacher, task settings, and hashes of the teacher prompt and task code), `accepted.jsonl` (SFT rows), `log.jsonl` (every attempt and verdict; reruns resume from it), `stats.json` (yield, rejection reasons, token usage) |
 | `labels` | `data/sft/<task>/labels_<split>_n<n>[_<task args>].jsonl` |
-| `sft` | `output_dir/` (adapter), `output_dir/merged/` (merged model), `sft_summary.json` |
+| `sft` | `output_dir/` (LoRA adapter, or the model with full fine-tuning), `output_dir/merged/` (LoRA merged into the model), `trained_ids.txt` in each, `sft_summary.json` |
 | `eval` | `results/<task>/eval/<tag>/metrics.json` and `predictions.jsonl` (every completion and its score); `<tag>` defaults to the model folder's name (`<run>-merged` for an SFT model) |
 | `grpo --filter-only` | `output_dir/pass_rate_filter.json` (statistics and advice), `output_dir/pass_rate_kept.txt` |
-| `grpo` | `output_dir/` = **best model on validation** (a copy of the start model if nothing beat it), `output_dir/last/` = final model, `output_dir/validation.json` (scores per check, best step, weight change, entropy stop) |
+| `grpo` | `output_dir/` = **best model on validation** (a copy of the start model if nothing beat it; the final model when there is no validation), `output_dir/last/` = final model, `trained_ids.txt`, `output_dir/validation.json` (scores per check, best step, weight change, entropy stop) |
 
 ## What the framework handles
 - **Teacher client** (`distillops/teacher.py`): any OpenAI-compatible API; configurable concurrency,
@@ -364,20 +377,20 @@ optimizer state and every checkpoint); disk space for what will be written is ch
 The two example tasks exist to show the workflow and what it achieves; their code lives in `tasks/`
 and is not needed to use the framework on your own task.
 
-### Math: GSM8K (Qwen3-0.6B student, all 1,319 test problems)
-| Student | Accuracy |
+### Math: GSM8K (Qwen3-1.7B-Base student, all 1,319 test problems)
+| Model | Accuracy |
 |---|---|
-| Untrained (step-by-step prompt) | 62.4% |
-| SFT on answers only (no reasoning) | 13.6% |
-| SFT on human-written GSM8K solutions | 49.0% |
-| **SFT on DeepSeek reasoning (rejection-sampled)** | **62.5%** |
-| **+ GRPO (1 epoch, reward = `Task.score`)** | **66.8%** |
+| Qwen3-1.7B-Base, untrained (zero-shot, plain prompt) | 73.8% |
+| **+ SFT on DeepSeek reasoning (rejection-sampled, full fine-tuning)** | **78.5%** |
+| **+ GRPO (1 epoch, reward = `Task.score`)** | **80.4%** |
+| *Qwen3-1.7B: Qwen's own post-trained model, for reference* | *80.2%* |
 
-Teacher: DeepSeek Flash, 7,274 of 7,473 problems accepted (97.3%), **3.79 CNY**. Reasoning is essential
-(answers only: 13.6%) and the teacher's verified, explicit steps beat human solutions by 13.5 points.
-SFT alone matches the untrained model (which its makers had already distilled on math); GRPO on top of
-the SFT checkpoint adds **+4.3 points** (paired: p < 1e-5 vs SFT, p ≈ 1e-3 vs untrained). 64.7% of
-training prompts carried a learning signal; token entropy went 0.35 -> 0.21 (no collapse).
+Teacher: DeepSeek Flash, 7,274 of 7,473 problems accepted (97.3%), **3.79 CNY**. The student is a base
+model, which has seen no post-training on math, so the gain is the distillation's own. Paired over
+the 1,319 problems: SFT adds **+4.7 points** (95% CI +2.4 to +7.1, p < 1e-4) and GRPO with the same
+verifier as reward **+1.9** more (+0.3 to +3.5, p = 0.02); the result is level with Qwen's post-trained
+Qwen3-1.7B (+0.2, p = 0.9). Before GRPO, 34.6% of training prompts carried a learning signal (63.6%
+were always solved); token entropy went 0.17 -> 0.15 (no collapse).
 
 ### Recommendation: an LLM recommender as teacher (Amazon Industrial, 1,000 test users)
 | Model | HR@10 | NDCG@10 |
@@ -417,9 +430,9 @@ The two-stage system loses this (its re-ranker is ID-based); routing unseen item
 standard fix and is not yet measured.
 
 ### Takeaways
-1. For multi-step tasks, verified teacher reasoning is worth more than human-written data: +13.5 points
-   on GSM8K, and reasoning is essential (answer-only training collapses to 13.6%). SFT on teacher data
-   gives a clean starting point; GRPO with the same verifier as reward adds another +4.3 points.
+1. A few CNY of verified teacher reasoning replace a model's math post-training: on GSM8K, SFT takes a
+   base model +4.7 points and GRPO with the same verifier as reward +1.9 more, matching Qwen's own
+   post-trained model of the same size.
 2. Always compare against a same-data, no-teacher control (`python -m distillops labels`), not just the
    untrained model, to see what the teacher itself contributes.
 3. For latency-bound products, use the LLM as an offline teacher: item embeddings plus soft labels lifted

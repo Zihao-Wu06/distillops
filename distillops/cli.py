@@ -4,7 +4,7 @@
     python -m distillops labels  --task tasks.math.gsm8k:GSM8KTask                  # label-only control data
     python -m distillops sft     configs/sft_qwen3.yaml --train_file <accepted.jsonl>
     python -m distillops eval    --task tasks.math.gsm8k:GSM8KTask --model <ckpt> --n 500
-    python -m distillops grpo    configs/grpo_gsm8k_qwen3_0.6b.yaml --task tasks.math.gsm8k:GSM8KTask --filter-samples 8
+    python -m distillops grpo    configs/grpo_gsm8k_qwen3_1.7b_base.yaml --task tasks.math.gsm8k:GSM8KTask --filter-samples 8
     python -m distillops merge   --base Qwen/Qwen3-1.7B --adapter <lora_dir> --out <merged_dir>
     python -m distillops usage   --teacher <teacher.yaml>                           # teacher calls and tokens
     python -m distillops doctor                                                       # check this machine first

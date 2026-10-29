@@ -1,0 +1,31 @@
+# GRPO for GSM8K, starting from Qwen3-1.7B-Base fine-tuned on the teacher's reasoning
+# (configs/sft_qwen3_full.yaml); the same command works for any task:
+#   python -m distillops grpo configs/grpo_gsm8k_qwen3_1.7b_base.yaml --task tasks.math.gsm8k:GSM8KTask \
+#       --filter-samples 8 --filter-only
+#   python -m distillops grpo configs/grpo_gsm8k_qwen3_1.7b_base.yaml --task tasks.math.gsm8k:GSM8KTask \
+#       --keep-ids checkpoints/gsm8k_1.7b_base_grpo/pass_rate_kept.txt --epochs 1
+# Full fine-tuning of 1.7B parameters (fp32 weights, gradients, Adam: ~33 GB) plus vLLM's share: run on a 96 GB GPU.
+model: checkpoints/gsm8k_1.7b_base_teacher
+output_dir: checkpoints/gsm8k_1.7b_base_grpo
+num_generations: 8
+max_prompt_length: 512
+max_completion_length: 512  # step-by-step solution + ANSWER line
+temperature: 1.0
+lr: 1.0e-6
+beta: 0.0
+epsilon: 0.2
+loss_type: dapo
+batch_size: 64              # 8 prompts x 8 generations per device step (shrinks to fit memory)
+grad_accum: 4               # 32 prompts per optimizer step
+max_steps: 200
+use_vllm: true
+vllm_mode: colocate
+vllm_gpu_memory_utilization: 0.25
+lora: false
+eval_every: 0               # SFT saw nearly every training problem (the rest are ones the teacher failed):
+                            # no representative validation, so the final model is kept; for checkpoint
+                            # selection, use --task-arg valid_size=500 (README: Quick start)
+logging_steps: 5
+save_steps: 100
+extra:
+  epsilon_high: 0.28
