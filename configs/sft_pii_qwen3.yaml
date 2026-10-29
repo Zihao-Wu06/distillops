@@ -1,0 +1,12 @@
+# LoRA SFT of the student on entity lists (teacher-labelled or gold); override --train_file / --output_dir.
+model: Qwen/Qwen3-0.6B
+train_file: results/pii/teacher_train_n0/accepted.jsonl
+output_dir: checkpoints/pii_0.6b_teacher
+max_length: 1024          # system prompt (~250 tokens) + text (<= ~350) + entity list
+epochs: 2
+lr: 1.0e-4
+batch_size: 8
+grad_accum: 4
+lora: true
+lora_r: 32
+lora_alpha: 64

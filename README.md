@@ -17,6 +17,11 @@ You describe a task once, in a `Task` class: its data, prompts, a verifier and a
 commands then collect verified teacher answers, fine-tune, evaluate and run reinforcement learning
 (GRPO). Only the teacher's text answers are needed, never its logits, so any API model can teach.
 
+**Three worked examples**, chosen to be very different: math (above), **personal-information
+detection**, where a 0.6B student that never trains on a human label beats its teacher (0.955 vs
+0.934 F1), and **recommendation**, where an LLM teacher lifts a 0.5M-parameter recommender to the
+level of 1.5B-7B LLM recommenders. See [Results](#results).
+
 **Contents:** [Try it](#try-it) · [What it can be used for](#what-it-can-be-used-for) ·
 [How it works](#how-it-works) · [Add your own task](#add-your-own-task) · [Results](#results) ·
 [Install](#install) · [Hardware](#hardware) · [Reference](#reference) · [Related work](#related-work) ·
@@ -60,8 +65,8 @@ The one requirement: given an input and an output, your code can say whether the
 | Short-answer QA | the normalised answer matches |
 | Ranking, retrieval, recommendation | the right item appears in the output (e.g. in the top-k) |
 
-Two of these ship as worked examples, chosen to be very different: **math (GSM8K)** and
-**recommendation (Amazon)**. They show what the framework does and how well; nothing in the framework
+Three of these ship as worked examples: **math (GSM8K)**, **personal-information (PII)
+detection** (structured extraction) and **recommendation (Amazon)**. They show what the framework does and how well; nothing in the framework
 is specific to them. Any other task needs only its own `Task` class
 ([Add your own task](#add-your-own-task) has a complete one in ~45 lines).
 
@@ -188,7 +193,7 @@ where those outputs are dropped. Read accepted samples before scaling up. If GRP
 reports a sparse reward, a `score` that gives partial credit is the first thing to try.
 
 ## Results
-The two included examples, chosen to be very different, show what the framework does and
+The three included examples, chosen to be very different, show what the framework does and
 how well; their code lives in `tasks/` and is not needed for your own task.
 
 ### Math: GSM8K (Qwen3-1.7B-Base student, all 1,319 test problems)
@@ -247,6 +252,26 @@ python -m distillops usage   --teacher $TEACHER                                 
 - **Teacher:** the included results used DeepSeek (`configs/teacher_deepseek.yaml`); the GSM8K teacher
   calls cost 3.79 CNY (3.74 for the full run, 0.05 for the 100-problem smoke test).
 
+### Personal-information detection: a student that beats its teacher
+Find names, contact details, addresses, ID and card numbers, dates and demographics in English text
+([OpenPII-1M](https://huggingface.co/datasets/ai4privacy/pii-masking-openpii-1m)) so they can be masked
+locally. The teacher (DeepSeek, 3 worked examples) labels 10,000 texts; its answers are accepted by
+rules alone (values copied verbatim, plausible formats, no long number left unmasked), with no gold
+labels. A Qwen3-0.6B student then learns from them, and GRPO uses per-text F1 as the reward.
+
+| Model (2,000 test texts, 7 categories) | Labelled texts used | Mean F1 | Personal info left visible |
+|---|---|---|---|
+| Qwen3-0.6B, untrained | - | 0.158 | 73.1% |
+| Teacher (DeepSeek, 3-shot) | 103 (100 to write its instructions, 3 as examples) | 0.934 | 3.0% |
+| **0.6B, SFT on rule-checked teacher labels** | **103** (the teacher's; it trains on none) | **0.945** | 2.0% |
+| **+ GRPO on a small labelled pool** | **2,100** | **0.955** | **1.9%** |
+| 0.6B, SFT on gold labels of all 10,000 texts (control) | 10,000 | 0.982 | 1.1% |
+
+The student beats its teacher (+1.15 points, 95% CI +0.65 to +1.67, p = 4e-5), and GRPO adds +0.95
+(p = 1e-9); teacher labels reach 96-97% of what full human annotation gives. Teacher calls: 17.7 CNY.
+Per-category scores, the pilot batch that shaped the teacher's instructions, leakage checks and
+the commands: [tasks/pii/README.md](tasks/pii/README.md).
+
 ### Recommendation: an LLM teacher for a deployable recommender
 A task far from math: next-item recommendation on Amazon Industrial & Scientific. A fine-tuned
 Qwen3-1.7B recommends well but is too large to serve, so it is used offline as a teacher (item
@@ -262,7 +287,10 @@ of their serving size. Tables, cold-start results and the commands to reproduce:
 2. Always compare against a same-data, no-teacher control (`python -m distillops labels`), not just the
    untrained model, to see what the teacher itself contributes: on GSM8K, SFT on the human solutions of
    the same problems lowered the score (73.8% -> 68.5%) while the teacher's reasoning raised it (80.1%).
-3. For latency-bound products, use the LLM as an offline teacher: item embeddings plus soft labels lifted
+3. Labelling every training text is not needed: rules that check the teacher's answers, plus 100
+   labelled texts to write its instructions, train a 0.6B PII detector that beats its teacher, and
+   2,000 labelled texts for GRPO bring it to 97% of what labelling all 10,000 training texts gives.
+4. For latency-bound products, use the LLM as an offline teacher: item embeddings plus soft labels lifted
    SASRec by 22-24% HR@10, and a two-stage recall + re-rank matched recent LLM recommenders, at
    unchanged serving cost.
 
@@ -476,17 +504,20 @@ optimizer state and every checkpoint); disk space for what will be written is ch
 ```
 distillops/       the framework: teacher, task interface, rejection sampling, sft, evaluate, grpo,
                   chat (templates), precision / memory / preflight, cli
-tasks/            the two included example tasks (not needed for your own):
+tasks/            the three included example tasks (not needed for your own):
   math/           GSM8K, also the reference implementation of a Task
+  pii/            personal-information detection (its own README.md): labels, entity parsing and
+                  rule checks, F1 and leak rate
   rec/            recommendation (its own README.md): data, SASRec baseline and distillation, prompts, title trie,
                   constrained beams, item embeddings; resources/ holds the SFT user list
-scripts/          check_task.py (any task); rec_*.py: the recommendation example (prepare, SASRec sweep,
-                  build SFT data, LLM / SASRec eval, paired comparison, SASRec distillation, two-stage)
+scripts/          check_task.py (any task); pii_*.py: the PII example (prepare, rule check, teacher eval);
+                  rec_*.py: the recommendation example (prepare, SASRec sweep, build SFT data,
+                  LLM / SASRec eval, paired comparison, SASRec distillation, two-stage)
 configs/          teacher, SFT and GRPO configs (example settings)
 assets/           README figures
 tests/            unit tests; no network or GPU needed
 ```
 `data/`, `results/`, `checkpoints/` and `cache/` are created at run time and not tracked.
 
-Data: GSM8K (MIT); MiniOneRec's preprocessed Amazon splits (Apache-2.0) of the Amazon Reviews dataset
+Data: GSM8K (MIT); OpenPII-1M by Ai4Privacy (CC-BY-4.0); MiniOneRec's preprocessed Amazon splits (Apache-2.0) of the Amazon Reviews dataset
 (McAuley Lab). Code: MIT.

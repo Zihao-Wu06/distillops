@@ -1,0 +1,12 @@
+# Teacher for the PII example (tasks/pii): DeepSeek, OpenAI-compatible. Any OpenAI-compatible provider
+# works the same way (see teacher_template.yaml).
+base_url: https://api.deepseek.com
+model: deepseek-flash
+api_key_env: DEEPSEEK_API_KEY
+temperature: 0.7          # > 0 so a retry can give a different answer
+max_tokens: 800           # an entity list; the longest texts have ~30 entities
+max_concurrency: 256
+extra_body:               # DeepSeek: answer directly, no hidden reasoning
+  thinking:
+    type: disabled
+cache_path: cache/teacher_deepseek.sqlite
