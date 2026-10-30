@@ -1,8 +1,9 @@
 """Which vision features the installed libraries support, and a report for `doctor`.
 
 Vision SFT and evaluation need only transformers. GRPO with images needs a TRL whose GRPOTrainer
-takes an `images` column (TRL >= 0.20) and, with vLLM rollouts, a vLLM that serves the model's
-architecture with image input.
+takes an `images` column (TRL >= 0.20), from before TRL 0.28 (which removed GRPOConfig's
+max_prompt_length and the colocated vLLM weight sync this package uses) and, with vLLM rollouts, a
+vLLM that serves the model's architecture with image input.
 """
 
 from __future__ import annotations
@@ -10,6 +11,7 @@ from __future__ import annotations
 from typing import Any
 
 MIN_TRL_FOR_IMAGES = (0, 20)
+FIRST_UNSUPPORTED_TRL = (0, 28)  # tested on GPU with 0.24
 
 
 def _version(mod: str) -> str | None:
@@ -49,6 +51,10 @@ def require_grpo_support(use_vllm: bool, architectures: list[str]) -> None:
     if not trl_supports_images():
         raise SystemExit(f"GRPO with images needs TRL >= {'.'.join(map(str, MIN_TRL_FOR_IMAGES))} "
                          f"(installed: {_version('trl')}); upgrade TRL")
+    if _tuple(_version("trl")) >= FIRST_UNSUPPORTED_TRL:
+        raise SystemExit(f"vision GRPO needs TRL < {'.'.join(map(str, FIRST_UNSUPPORTED_TRL))} (installed: "
+                         f"{_version('trl')}): TRL 0.28 removed max_prompt_length and the vLLM weight sync it uses. "
+                         'Install it with: pip install "trl>=0.20,<0.28"')
     if use_vllm:
         ok = vllm_supports(architectures)
         if ok is False:

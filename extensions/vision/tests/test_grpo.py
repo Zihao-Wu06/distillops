@@ -133,6 +133,14 @@ def test_grpo_stops_early_when_trl_cannot_take_images(monkeypatch):
         compat.require_grpo_support(False, ["Qwen2VLForConditionalGeneration"])
 
 
+def test_grpo_stops_early_on_a_trl_without_the_apis_it_uses(monkeypatch):
+    from distillops_vision import compat
+
+    monkeypatch.setattr(compat, "_version", lambda m: "1.17.1" if m == "trl" else None)
+    with pytest.raises(SystemExit, match=r"trl>=0.20,<0.28"):
+        compat.require_grpo_support(False, ["Qwen2VLForConditionalGeneration"])
+
+
 def test_grpo_dataset_keeps_images_decoded_in_memory(vlm, toy_data):
     from vision_toy import ColourTask
 
