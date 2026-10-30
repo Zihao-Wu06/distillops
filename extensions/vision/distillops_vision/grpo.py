@@ -83,13 +83,7 @@ def estimate_pass_rates(model: str, task: Any, examples: Sequence[Any], processo
               max_model_len=(max_prompt_length + max_tokens) if max_prompt_length else None, seed=0,
               trust_remote_code=trust_remote_code, **({"limit_mm_per_prompt": {"image": most}} if most else {}))
     eot = end_of_turn_id(TemplateView(processor))
-    inputs = []
-    for m in msgs:
-        item: dict[str, Any] = {"prompt": render(processor, m, add_generation_prompt=True, **(template_kwargs or {}))}
-        parts = images.image_parts(m)
-        if parts:
-            item["multi_modal_data"] = {"image": [images.load_part(p, max_pixels) for p in parts]}
-        inputs.append(item)
+    inputs = vllm_inputs(task, examples, processor, max_pixels, template_kwargs)
     from .compat import vllm_ban
 
     banned = suppressed_ids(load_config(model, trust_remote_code), processor)
@@ -100,10 +94,28 @@ def estimate_pass_rates(model: str, task: Any, examples: Sequence[Any], processo
     return scores, signal_stats(scores)
 
 
+def vllm_inputs(task: Any, examples: Sequence[Any], processor: Any, max_pixels: int | None,
+                template_kwargs: dict | None = None) -> list[dict]:
+    """vLLM prompts for `examples`: the rendered prompt and its images (loaded and sized once)."""
+    out = []
+    for ex in examples:
+        m = task.student_messages(ex)
+        item: dict[str, Any] = {"prompt": render(processor, m, add_generation_prompt=True, **(template_kwargs or {}))}
+        parts = images.image_parts(m)
+        if parts:
+            item["multi_modal_data"] = {"image": [images.load_part(p, max_pixels) for p in parts]}
+        out.append(item)
+    return out
+
+
 def make_evaluator(task: Any, examples: Sequence[Any], max_new_tokens: int, max_pixels: int | None,
                    template_kwargs: dict | None = None) -> Callable[[Any, Any], tuple[float, float]]:
     """evaluate(model, processor) -> (mean Task.score of greedy completions, standard error), on the
-    model being trained (switched to eval mode and back)."""
+    model being trained (switched to eval mode and back).
+
+    `evaluate.with_vllm(trainer, sampling_kwargs)` scores the same prompts with the trainer's colocated
+    vLLM instead (its weights synced first): much faster than generating with transformers, and it
+    needs no memory beyond what vLLM already holds."""
 
     def evaluate(model: Any, processor: Any) -> tuple[float, float]:
         import torch
@@ -128,7 +140,99 @@ def make_evaluator(task: Any, examples: Sequence[Any], max_new_tokens: int, max_
                 torch.cuda.empty_cache()
         return mean_and_se([float(task.score(ex, c)) for ex, c in zip(examples, outs)])
 
+    cached: list[dict] = []
+
+    def with_vllm(trainer: Any, sampling_kwargs: dict[str, Any]) -> tuple[float, float]:
+        from vllm import SamplingParams
+
+        if not cached:
+            cached.extend(vllm_inputs(task, examples, trainer.processing_class, max_pixels, template_kwargs))
+        step = trainer.state.global_step
+        if getattr(trainer, "_last_loaded_step", None) != step:  # the next rollout then skips its own sync
+            trainer._move_model_to_vllm()
+            trainer._last_loaded_step = step
+        params = SamplingParams(n=1, temperature=0.0, max_tokens=max_new_tokens, **sampling_kwargs)
+        outs = trainer.llm.generate(cached, sampling_params=params, use_tqdm=False)
+        return mean_and_se([float(task.score(ex, o.outputs[0].text)) for ex, o in zip(examples, outs)])
+
+    evaluate.with_vllm = with_vllm  # type: ignore[attr-defined]
     return evaluate
+
+
+def cpu_threads() -> int:
+    """CPU cores this process may use: its affinity, capped by a cgroup CPU quota (containers)."""
+    import os
+
+    n = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 1)
+    try:
+        quota, period = Path("/sys/fs/cgroup/cpu.max").read_text().split()[:2]
+        if quota != "max":
+            n = min(n, max(1, int(int(quota) / int(period))))
+    except (OSError, ValueError):
+        pass
+    return n
+
+
+def image_dataset(rows: Sequence[dict]) -> Any:
+    """The GRPO dataset. Images stay in memory as decoded images and are attached when a row is read;
+    a datasets.Dataset would store them as PNG bytes and decode them on every read (each prompt is
+    read num_generations times per step)."""
+    from datasets import Dataset
+
+    pics = [r.get("images") for r in rows]
+    if not any(pics):
+        return Dataset.from_list(list(rows))
+    base = Dataset.from_list([{**{k: v for k, v in r.items() if k != "images"}, "_row": i} for i, r in enumerate(rows)])
+
+    def attach(batch: dict) -> dict:
+        batch["images"] = [pics[i] for i in batch["_row"]]
+        return batch
+
+    base.set_transform(attach)
+    return base
+
+
+def trainer_class() -> type:
+    """TRL's GRPOTrainer with a faster weight sync to a colocated vLLM. TRL calls vLLM's load_weights
+    once per parameter, and each call pays vLLM's weight-loading overhead in Python, single-threaded,
+    with the GPU idle. Here one call takes every trained parameter; frozen ones (the image encoder) are
+    not sent, since vLLM loaded the same values from the start model. Other setups (LoRA, DeepSpeed,
+    FSDP, a vLLM server) use TRL's own sync, and so does a TRL or vLLM version without the internals
+    this relies on (tested with TRL 0.24 and vLLM 0.11)."""
+    from trl import GRPOTrainer
+
+    class VisionGRPOTrainer(GRPOTrainer):
+        def _move_model_to_vllm(self) -> None:
+            llm_model = fast_sync_target(self)
+            if llm_model is None:
+                return GRPOTrainer._move_model_to_vllm(self)
+            llm_model.load_weights([(self._fix_param_name_to_vllm(name), p.data)
+                                    for name, p in self.model.named_parameters() if p.requires_grad])
+            self.llm.reset_prefix_cache()
+
+    return VisionGRPOTrainer
+
+
+def fast_sync_target(trainer: Any) -> Any:
+    """The colocated vLLM model to load weights into in one call, or None to use TRL's own sync."""
+    state = getattr(getattr(trainer, "accelerator", None), "state", None)
+    if (getattr(trainer, "vllm_mode", None) != "colocate" or getattr(trainer, "is_fsdp_enabled", False)
+            or getattr(state, "deepspeed_plugin", None) is not None or hasattr(trainer.model, "peft_config")):
+        return None
+    try:
+        llm_model = trainer.llm.llm_engine.model_executor.driver_worker.model_runner.model
+    except AttributeError:
+        llm_model = None
+    usable = (llm_model is not None and callable(getattr(llm_model, "load_weights", None))
+              and callable(getattr(trainer, "_fix_param_name_to_vllm", None))
+              and callable(getattr(trainer.llm, "reset_prefix_cache", None)))
+    if not usable:
+        if not getattr(trainer, "_fast_sync_note", False):
+            print("note: this TRL/vLLM version does not expose what the one-call weight sync needs; using TRL's "
+                  "own (slower) sync", flush=True)
+            trainer._fast_sync_note = True
+        return None
+    return llm_model
 
 
 def rollout_kwargs(use_vllm: bool, stops: list[int], eot: int | None, banned: list[int]) -> dict[str, Any]:
@@ -145,8 +249,7 @@ def rollout_kwargs(use_vllm: bool, stops: list[int], eot: int | None, banned: li
 
 def train(cfg: VisionGRPOConfig, reward_funcs: Sequence[Callable], rows: Sequence[dict],
           evaluator: Callable[[Any, Any], Any] | None = None, processor: Any = None) -> dict:
-    from datasets import Dataset
-    from trl import GRPOConfig, GRPOTrainer
+    from trl import GRPOConfig
 
     from distillops.chat import end_of_turn_id, save_stop_tokens, stop_token_ids
     from distillops.grpo import _relative_change, _snapshot
@@ -211,12 +314,24 @@ def train(cfg: VisionGRPOConfig, reward_funcs: Sequence[Callable], rows: Sequenc
     selector = None
     holder: dict[str, Any] = {}
     if evaluator is not None and cfg.eval_every > 0:
-        selector = validation_selector(lambda m: evaluator(m, processor), cfg.eval_every, cfg.eval_patience,
+        if cfg.use_vllm and cfg.vllm_mode == "colocate" and hasattr(evaluator, "with_vllm"):
+            sampling = args.generation_kwargs or {}
+            evaluate = lambda m: evaluator.with_vllm(holder["trainer"], sampling)  # noqa: E731
+            print("validation: greedy generation with the colocated vLLM", flush=True)
+        else:
+            evaluate = lambda m: evaluator(m, processor)  # noqa: E731
+        selector = validation_selector(evaluate, cfg.eval_every, cfg.eval_patience,
                                        lambda: holder["trainer"].save_model(cfg.output_dir))
         callbacks.append(selector)
-    trainer = GRPOTrainer(model=model, reward_funcs=list(reward_funcs), args=args, processing_class=processor,
-                          train_dataset=Dataset.from_list(list(rows)), peft_config=peft_config, callbacks=callbacks)
+    trainer = trainer_class()(model=model, reward_funcs=list(reward_funcs), args=args, processing_class=processor,
+                              train_dataset=image_dataset(rows), peft_config=peft_config, callbacks=callbacks)
     holder["trainer"] = trainer
+    import torch
+
+    threads = cpu_threads()
+    if torch.get_num_threads() != threads:  # image preprocessing runs on the CPU (vLLM may have set 1 thread)
+        print(f"note: torch CPU threads {torch.get_num_threads()} -> {threads}", flush=True)
+        torch.set_num_threads(threads)
     if cfg.lora:
         cast = upcast_trainable(trainer.model)
         if cast:

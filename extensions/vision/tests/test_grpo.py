@@ -131,3 +131,113 @@ def test_grpo_stops_early_when_trl_cannot_take_images(monkeypatch):
     monkeypatch.setattr(compat, "_version", lambda m: "0.19.0" if m == "trl" else None)
     with pytest.raises(SystemExit, match="TRL >= 0.20"):
         compat.require_grpo_support(False, ["Qwen2VLForConditionalGeneration"])
+
+
+def test_grpo_dataset_keeps_images_decoded_in_memory(vlm, toy_data):
+    from vision_toy import ColourTask
+
+    from distillops_vision.grpo import image_dataset, rows_and_reward
+
+    task = ColourTask()
+    rows, _ = rows_and_reward(task, task.load_examples("train"), vm.load_processor(vlm), None)
+    ds = image_dataset(rows)
+    assert len(ds) == len(rows)
+    first = ds[0]
+    assert first["images"][0] is rows[0]["images"][0]  # the same object: no PNG round trip per read
+    assert first["prompt"] == rows[0]["prompt"] and first["ex_id"] == rows[0]["ex_id"]
+    assert ds[0]["images"][0] is ds[0]["images"][0]
+    plain = image_dataset([{"prompt": "p", "ex_id": "a"}])
+    assert plain[0] == {"prompt": "p", "ex_id": "a"}
+
+
+def test_validation_with_vllm_syncs_once_then_scores_greedy_answers(vlm, toy_data, monkeypatch):
+    from vision_toy import ColourTask
+
+    from distillops_vision.grpo import make_evaluator
+
+    calls = {"sync": 0}
+
+    class SamplingParams:
+        def __init__(self, **kw):
+            self.__dict__.update(kw)
+
+    class LLM:
+        def generate(self, inputs, sampling_params, use_tqdm):
+            calls["inputs"], calls["params"] = inputs, sampling_params
+            return [types.SimpleNamespace(outputs=[types.SimpleNamespace(text="COLOUR: red")]) for _ in inputs]
+
+    class Trainer:
+        processing_class = vm.load_processor(vlm)
+        state = types.SimpleNamespace(global_step=3)
+        _last_loaded_step = 2
+        llm = LLM()
+
+        def _move_model_to_vllm(self):
+            calls["sync"] += 1
+
+    monkeypatch.setitem(sys.modules, "vllm", types.SimpleNamespace(SamplingParams=SamplingParams))
+    task = ColourTask()
+    examples = task.load_examples("train")
+    evaluate = make_evaluator(task, examples, 8, None)
+    trainer = Trainer()
+    mean, _ = evaluate.with_vllm(trainer, {"stop_token_ids": [1]})
+    assert calls["sync"] == 1 and trainer._last_loaded_step == 3  # the next rollout skips its sync
+    assert calls["params"].temperature == 0.0 and calls["params"].max_tokens == 8
+    assert calls["params"].stop_token_ids == [1]
+    assert len(calls["inputs"]) == 4 and len(calls["inputs"][0]["multi_modal_data"]["image"]) == 1
+    assert mean == sum(task.score(ex, "COLOUR: red") for ex in examples) / 4
+    evaluate.with_vllm(trainer, {})
+    assert calls["sync"] == 1  # weights already in vLLM for this step
+
+
+def test_cpu_threads_is_at_least_one():
+    from distillops_vision.grpo import cpu_threads
+
+    assert cpu_threads() >= 1
+
+
+def _fake_trainer(llm_model, peft=False):
+    import torch
+
+    model = torch.nn.Sequential(torch.nn.Linear(2, 2), torch.nn.Linear(2, 2))
+    model[0].weight.requires_grad_(False)  # a frozen module (e.g. the image encoder)
+    model[0].bias.requires_grad_(False)
+    if peft:
+        model.peft_config = {}
+    engine = types.SimpleNamespace(model_executor=types.SimpleNamespace(
+        driver_worker=types.SimpleNamespace(model_runner=types.SimpleNamespace(model=llm_model))))
+    resets = []
+    return types.SimpleNamespace(
+        vllm_mode="colocate", is_fsdp_enabled=False, model=model,
+        accelerator=types.SimpleNamespace(state=types.SimpleNamespace(deepspeed_plugin=None)),
+        llm=types.SimpleNamespace(llm_engine=engine, reset_prefix_cache=lambda: resets.append(1)),
+        _fix_param_name_to_vllm=lambda n: "vllm." + n, resets=resets)
+
+
+def test_weight_sync_sends_trained_parameters_in_one_call(monkeypatch):
+    from trl import GRPOTrainer
+
+    from distillops_vision.grpo import trainer_class
+
+    calls = []
+    llm_model = types.SimpleNamespace(load_weights=lambda w: calls.append([n for n, _ in w]))
+    monkeypatch.setattr(GRPOTrainer, "_move_model_to_vllm", lambda self: calls.append("trl"))
+    t = _fake_trainer(llm_model)
+    trainer_class()._move_model_to_vllm(t)
+    assert calls == [["vllm.1.weight", "vllm.1.bias"]] and t.resets == [1]  # frozen ones not sent
+
+
+def test_weight_sync_falls_back_to_trl(monkeypatch, capsys):
+    from trl import GRPOTrainer
+
+    from distillops_vision.grpo import trainer_class
+
+    calls = []
+    monkeypatch.setattr(GRPOTrainer, "_move_model_to_vllm", lambda self: calls.append("trl"))
+    sync = trainer_class()._move_model_to_vllm
+    sync(_fake_trainer(types.SimpleNamespace(load_weights=lambda w: calls.append("fast")), peft=True))  # LoRA
+    old = _fake_trainer(types.SimpleNamespace())  # a vLLM model without load_weights (another version)
+    sync(old)
+    sync(old)
+    assert calls == ["trl"] * 3
+    assert capsys.readouterr().out.count("one-call weight sync") == 1  # said once

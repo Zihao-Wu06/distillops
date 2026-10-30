@@ -5,8 +5,16 @@ receipt extraction, chart questions, OCR, UI grounding, image classification, an
 program can check a text answer about an image. The workflow is distillops' own (teacher -> verify
 -> SFT -> evaluation -> GRPO); only the inputs gain images. Nothing in distillops is changed.
 
-> Status: tested end to end on CPU with tiny models of three architectures (below). It has not yet
-> been run on a real task with a real teacher and GPU, so there are no results to report yet.
+> Status: run end to end on a real task with Qwen3-VL on one GPU (below); tested on CPU with tiny
+> models of three architectures. Other architectures, GRPO with LoRA, and several GPUs have not been
+> run on a GPU yet.
+
+## Result: reading receipts
+[vision_tasks/cord](vision_tasks/cord/README.md): a Qwen3-VL-2B student reads receipt photos into
+JSON (items, totals, cash, change). Trained on the labels of Qwen3-VL-32B, accepted only when the
+receipt's own arithmetic adds up (no human label), it scores **0.897** F1 on 200 test receipts, tying
+its teacher (0.896) and up from 0.756 untrained. GRPO on 200 human-labelled receipts raises it to
+0.905 and the share read perfectly from 42% to 49.5%; SFT on all 800 gold labels reaches 0.928.
 
 ## How it works
 A vision-language model reads an image as extra input (tokens in the sequence, or features read
@@ -122,7 +130,11 @@ images. A task may mix prompts with and without images, and prompts with several
 | Encoder-free (Fuyu) | raw patches | not tested; `train_vision` does not apply (no encoder to freeze) |
 
 GRPO with images needs TRL >= 0.20; with vLLM rollouts, a vLLM that serves the architecture
-(`doctor` reports both). Rollouts never sample image placeholder tokens (`suppress_tokens` with
+(`doctor` reports both). With vLLM colocated on the training GPU, the trained weights go to vLLM in
+one call per step (frozen ones are not sent), validation generates with that vLLM, images stay
+decoded in memory, and CPU preprocessing uses the container's CPU quota: on the receipts task this
+took a step from about 130 s to 45 s. Other setups, or TRL/vLLM versions without the internals this
+uses, fall back to TRL's own weight sync (tested with TRL 0.24, vLLM 0.11). Rollouts never sample image placeholder tokens (`suppress_tokens` with
 transformers, a logit bias with vLLM). The vision extension's own SFT uses transformers' Trainer, so it does
 not depend on how a TRL version handles vision models.
 
@@ -146,5 +158,6 @@ distillops_vision/
   compat.py     library support checks; doctor's vision report
   cli.py        teacher | sft | grpo | usage | merge | doctor | check-task
 configs/        teacher, SFT and GRPO templates
+vision_tasks/cord/  the receipts example: task, data preparation, GRPO pools, paired comparison
 tests/          CPU tests with tiny Qwen2-VL, LLaVA and Mllama models built offline
 ```
