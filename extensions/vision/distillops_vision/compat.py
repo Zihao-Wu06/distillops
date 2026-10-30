@@ -55,6 +55,10 @@ def require_grpo_support(use_vllm: bool, architectures: list[str]) -> None:
         raise SystemExit(f"vision GRPO needs TRL < {'.'.join(map(str, FIRST_UNSUPPORTED_TRL))} (installed: "
                          f"{_version('trl')}): TRL 0.28 removed max_prompt_length and the vLLM weight sync it uses. "
                          'Install it with: pip install "trl>=0.20,<0.28"')
+    if _tuple(_version("transformers")) >= (5, 0):
+        raise SystemExit(f"vision GRPO needs transformers < 5 (installed: {_version('transformers')}): TRL < 0.28 does "
+                         'not import with transformers 5. Install them with: pip install "trl>=0.20,<0.28" '
+                         '"transformers>=4.56,<5"')
     if use_vllm:
         ok = vllm_supports(architectures)
         if ok is False:

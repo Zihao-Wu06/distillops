@@ -129,8 +129,8 @@ images. A task may mix prompts with and without images, and prompts with several
 | Discrete image tokens (Chameleon, Emu3) | image tokens in the vocabulary | not tested; image-generation tokens are suppressed when answering |
 | Encoder-free (Fuyu) | raw patches | not tested; `train_vision` does not apply (no encoder to freeze) |
 
-GRPO with images needs TRL >= 0.20 and < 0.28 (0.28 removed APIs it uses; the `train` extra
-installs such a TRL); with vLLM rollouts, a vLLM that serves the architecture
+GRPO with images needs TRL >= 0.20 and < 0.28 (0.28 removed APIs it uses), and so transformers < 5
+(older TRL does not import with it); the `train` extra installs both; with vLLM rollouts, a vLLM that serves the architecture
 (`doctor` reports both). With vLLM colocated on the training GPU, the trained weights go to vLLM in
 one call per step (frozen ones are not sent), validation generates with that vLLM, images stay
 decoded in memory, and CPU preprocessing uses the container's CPU quota: on the receipts task this

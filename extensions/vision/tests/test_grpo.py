@@ -139,6 +139,10 @@ def test_grpo_stops_early_on_a_trl_without_the_apis_it_uses(monkeypatch):
     monkeypatch.setattr(compat, "_version", lambda m: "1.17.1" if m == "trl" else None)
     with pytest.raises(SystemExit, match=r"trl>=0.20,<0.28"):
         compat.require_grpo_support(False, ["Qwen2VLForConditionalGeneration"])
+    versions = {"trl": "0.24.0", "transformers": "5.22.1"}
+    monkeypatch.setattr(compat, "_version", versions.get)
+    with pytest.raises(SystemExit, match=r"transformers>=4.56,<5"):
+        compat.require_grpo_support(False, ["Qwen2VLForConditionalGeneration"])
 
 
 def test_grpo_dataset_keeps_images_decoded_in_memory(vlm, toy_data):
