@@ -1,0 +1,15 @@
+# SFT of Qwen3-VL-2B on CORD receipts (teacher labels, or gold labels for the control).
+model: Qwen/Qwen3-VL-2B-Instruct
+train_file: results/cord/teacher_train_n0/accepted.jsonl
+output_dir: checkpoints/cord_sft
+max_length: 3072          # tokens, the receipt image (~1,000) included
+epochs: 3
+lr: 1.0e-4
+batch_size: 8
+grad_accum: 4             # effective batch 32
+lora: true
+lora_r: 32
+lora_alpha: 64
+train_vision: false
+train_projector: true
+save_strategy: "no"

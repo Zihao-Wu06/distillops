@@ -1,0 +1,12 @@
+# Teacher for the CORD receipt example: Qwen3-VL-32B (FP8) served by vLLM on the training GPU,
+# called through its OpenAI-compatible API exactly as a hosted API would be:
+#   VLLM_API_KEY=local vllm serve Qwen/Qwen3-VL-32B-Instruct-FP8 --served-model-name qwen3-vl-32b \
+#       --max-model-len 8192 --limit-mm-per-prompt '{"image": 1, "video": 0}' --api-key local
+base_url: http://127.0.0.1:8000/v1
+model: qwen3-vl-32b
+api_key_env: VLLM_API_KEY
+temperature: 0.0          # greedy: the teacher scored at its best on the test set
+max_tokens: 2048
+max_concurrency: 64
+cache_path: cache/teacher_cord_eval.sqlite
+max_pixels: null          # the task's own size (CordTask.max_pixels): the teacher sees what the student sees

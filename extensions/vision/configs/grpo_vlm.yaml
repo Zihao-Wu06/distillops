@@ -1,0 +1,23 @@
+# GRPO for a vision-language student, reward = Task.score. Every field of distillops' GRPO config
+# applies; the vision ones are at the end.
+model: checkpoints/<task>_vlm_sft/merged
+output_dir: checkpoints/<task>_vlm_grpo
+num_generations: 8
+max_prompt_length: 2048   # tokens, images included; longer prompts are left out, never truncated
+max_completion_length: 256
+lr: 1.0e-6
+beta: 0.0
+loss_type: dapo
+batch_size: 32
+grad_accum: 2
+max_steps: 200
+use_vllm: true
+vllm_mode: colocate
+vllm_gpu_memory_utilization: 0.3
+lora: false
+eval_every: 25
+eval_examples: 200
+extra:
+  epsilon_high: 0.28
+train_vision: false
+train_projector: true
