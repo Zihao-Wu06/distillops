@@ -26,7 +26,7 @@ jobs:
         run: python -m pytest -q
 
   vision:
-    # its own job: the extension's `train` extra pins TRL below 0.28, and the core job keeps
+    # its own job: the extension's `train` extra pins TRL below 0.25, and the core job keeps
     # testing the newest libraries
     runs-on: ubuntu-latest
     strategy:

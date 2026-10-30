@@ -11,8 +11,8 @@ dependencies = [
 
 [project.optional-dependencies]
 train = ["distillops[train]", "torchvision",   # torchvision: video/image processors of some models (Qwen-VL)
-         "trl>=0.20,<0.28",                # GRPO: 0.28 removed APIs it uses (tested on GPU with 0.24)
-         "transformers>=4.56,<5"]          # TRL < 0.28 does not import with transformers 5 (tested: 4.57)
+         "trl>=0.20,<0.25",                # GRPO: 0.25 changed how image prompts are taken (tested on GPU: 0.24)
+         "transformers>=4.56,<5"]          # TRL < 0.25 does not import with transformers 5 (tested: 4.57)
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
 
 [build-system]

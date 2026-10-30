@@ -137,7 +137,7 @@ def test_grpo_stops_early_on_a_trl_without_the_apis_it_uses(monkeypatch):
     from distillops_vision import compat
 
     monkeypatch.setattr(compat, "_version", lambda m: "1.17.1" if m == "trl" else None)
-    with pytest.raises(SystemExit, match=r"trl>=0.20,<0.28"):
+    with pytest.raises(SystemExit, match=r"trl>=0.20,<0.25"):
         compat.require_grpo_support(False, ["Qwen2VLForConditionalGeneration"])
     versions = {"trl": "0.24.0", "transformers": "5.22.1"}
     monkeypatch.setattr(compat, "_version", versions.get)
