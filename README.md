@@ -440,7 +440,7 @@ optimizer state and every checkpoint); disk space for what will be written is ch
 |---|---|---|
 | `model`, `output_dir` | required | start checkpoint (the SFT model; `--model` overrides) and where to write |
 | `num_generations` | 8 | completions per prompt; the group is the baseline for the advantage |
-| `max_prompt_length`, `max_completion_length` | 768, 256 | token limits |
+| `max_prompt_length`, `max_completion_length` | 768, 256 | token limits; TRL < 0.28 keeps the last `max_prompt_length` tokens of a longer prompt, later TRL (which removed the argument) leaves such prompts out, with a count |
 | `temperature` | 1.0 | sampling temperature for rollouts |
 | `lr` | 1e-6 | learning rate (full fine-tuning keeps fp32 master weights) |
 | `beta` | 0.0 | KL coefficient to the start model (0 = no reference model) |

@@ -220,6 +220,42 @@ GRPO_FIELDS = {"output_dir": "output_dir", "learning_rate": "lr", "per_device_tr
                "save_steps": "save_steps", "seed": "seed"}
 
 
+def prompt_length_args(config_cls: Any, rows: Sequence[dict], tok: Any, max_prompt_length: int | None,
+                       max_completion_length: int) -> tuple[dict[str, Any], list[dict]]:
+    """Trainer arguments for the prompt limit, and the rows to train on.
+
+    TRL < 0.28 takes `max_prompt_length`: it keeps the last max_prompt_length tokens of a longer
+    prompt and sizes a colocated vLLM to prompt + completion. Later TRL removed the argument and
+    never truncates, so the limit is kept here: vLLM gets the same context (`vllm_max_model_length`)
+    and longer prompts, which would not fit it, are left out (with a count)."""
+    import dataclasses
+
+    fields = {f.name for f in dataclasses.fields(config_cls)}
+    if "max_prompt_length" in fields:
+        return {"max_prompt_length": max_prompt_length}, list(rows)
+    if not max_prompt_length:
+        return {}, list(rows)
+    from .chat import chat_ids
+
+    def length(prompt: Any) -> int:  # as TRL tokenizes it: text as is, messages with the chat template
+        if isinstance(prompt, str):
+            return len(tok(prompt)["input_ids"])
+        return len(chat_ids(tok, prompt, add_generation_prompt=True))
+
+    kept = [r for r in rows if length(r["prompt"]) <= max_prompt_length]
+    if len(kept) < len(rows):
+        print(f"note: this TRL version does not truncate prompts; {len(rows) - len(kept)} of {len(rows)} "
+              f"prompts are longer than max_prompt_length ({max_prompt_length} tokens) and are left out",
+              flush=True)
+    if not kept:
+        raise SystemExit(f"GRPO: every prompt is longer than max_prompt_length ({max_prompt_length} tokens); "
+                         "raise it")
+    args = {}
+    if "vllm_max_model_length" in fields:
+        args["vllm_max_model_length"] = max_prompt_length + max_completion_length
+    return args, kept
+
+
 def grpo_disk_bytes(params: int, lora: bool, args: Any, validation: bool, bytes_per_param: int = 4,
                     start_bytes: int = 0) -> int:
     """Disk a GRPO run writes. Full fine-tuning: each checkpoint and saved model holds the weights in
@@ -511,6 +547,7 @@ def train(
         print(f"note: the chat template ends a reply with {tok.convert_ids_to_tokens(eot)}, not EOS "
               f"{tok.eos_token}; generation stops at both", flush=True)
         tok.eos_token = tok.convert_ids_to_tokens(eot)
+    length_args, rows = prompt_length_args(GRPOConfig, rows, tok, cfg.max_prompt_length, cfg.max_completion_length)
 
     framework_args = dict(
         output_dir=cfg.output_dir,
@@ -518,7 +555,7 @@ def train(
         per_device_train_batch_size=batch,
         gradient_accumulation_steps=accum,
         num_generations=cfg.num_generations,
-        max_prompt_length=cfg.max_prompt_length,
+        **length_args,
         max_completion_length=cfg.max_completion_length,
         temperature=cfg.temperature,
         beta=cfg.beta,
