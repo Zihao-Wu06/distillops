@@ -26,9 +26,9 @@ detection**, where a 0.6B student that never trains on a human label beats its t
 level of 1.5B-7B LLM recommenders. See [Results](#results).
 
 **Tasks with image inputs** are handled by the [vision extension](extensions/vision/README.md), which
-runs the same workflow on prompts that contain images. On receipt photos, a Qwen3-VL-2B student trained on the labels of its
-32B teacher, kept only when the receipt's own arithmetic adds up (no human label), ties that teacher
-(0.897 vs 0.896 F1). See [Reading receipts](#images-reading-receipts-vision-extension).
+runs the same workflow on prompts that contain images. On receipt photos, a Qwen3-VL-2B student
+trained on the labels of its 32B teacher, kept only when the receipt's own arithmetic adds up (no
+human label), ties that teacher (0.897 vs 0.896 F1). See [Reading receipts](#images-reading-receipts-vision-extension).
 
 **Contents:** [Try it](#try-it) · [What it can be used for](#what-it-can-be-used-for) ·
 [How it works](#how-it-works) · [Add your own task](#add-your-own-task) · [Results](#results) ·
