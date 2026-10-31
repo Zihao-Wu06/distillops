@@ -25,8 +25,8 @@ detection**, where a 0.6B student that never trains on a human label beats its t
 0.934 F1), and **recommendation**, where an LLM teacher lifts a 0.5M-parameter recommender to the
 level of 1.5B-7B LLM recommenders. See [Results](#results).
 
-**Images too:** the [vision extension](extensions/vision/README.md) runs the same workflow on tasks
-whose prompts contain images. On receipt photos, a Qwen3-VL-2B student trained on the labels of its
+**Tasks with image inputs** are handled by the [vision extension](extensions/vision/README.md), which
+runs the same workflow on prompts that contain images. On receipt photos, a Qwen3-VL-2B student trained on the labels of its
 32B teacher, kept only when the receipt's own arithmetic adds up (no human label), ties that teacher
 (0.897 vs 0.896 F1). See [Reading receipts](#images-reading-receipts-vision-extension).
 
