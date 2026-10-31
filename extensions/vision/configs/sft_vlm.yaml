@@ -1,0 +1,15 @@
+# SFT of a vision-language student. Every field of distillops' SFT config applies; the vision ones
+# are at the end. Override --train_file / --output_dir / --model on the command line.
+model: Qwen/Qwen2.5-VL-3B-Instruct
+train_file: results/<task>/teacher_train_n0/accepted.jsonl
+output_dir: checkpoints/<task>_vlm_sft
+max_length: 2048          # tokens, images included (rows longer than this are dropped)
+epochs: 2
+lr: 1.0e-4                # LoRA; full fine-tuning would use ~1e-5
+batch_size: 4
+grad_accum: 8             # effective batch 32
+lora: true
+lora_r: 32
+lora_alpha: 64
+train_vision: false       # the image encoder stays frozen
+train_projector: true     # the layers mapping image features into the language model train

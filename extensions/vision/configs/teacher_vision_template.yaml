@@ -1,0 +1,14 @@
+# Teacher with image input: any OpenAI-compatible chat API that accepts image_url parts
+# (hosted APIs, or a vision model served by vLLM / SGLang). Every field of the framework's
+# teacher config (configs/teacher_template.yaml) applies; the two below are added.
+base_url: https://api.example.com/v1
+model: your-vision-model
+api_key_env: TEACHER_API_KEY      # name of the environment variable holding the key
+temperature: 1.0                  # > 0 so retries give different answers
+max_tokens: 1024
+max_concurrency: 32
+cache_path: cache/teacher_vision.sqlite
+# Largest image sent (width x height). Leave unset: each image goes at the task's own size
+# (VisionTask.max_pixels), so the teacher sees what the student will see.
+max_pixels: null
+image_detail: null                # "low" / "high" / "auto" for providers that accept it

@@ -1,0 +1,28 @@
+# GRPO on a small human-labelled pool of receipts (split rl), reward = per-receipt F1, starting from
+# the student trained on the teacher's labels. Checkpoints are chosen on split valid
+# (vision_tasks/cord/pools.py writes both).
+model: checkpoints/cord_teacher_notes/merged
+output_dir: checkpoints/cord_grpo
+num_generations: 8
+max_prompt_length: 2048       # tokens, the receipt image included (about 1,000 of them)
+max_completion_length: 768    # the longest teacher answer is 663 tokens
+temperature: 1.0
+lr: 3.0e-6                     # 1e-6 left validation flat over 24 steps
+beta: 0.0
+epsilon: 0.2
+loss_type: dapo
+batch_size: 64                # completions per device step (8 receipts)
+grad_accum: 2                 # 16 receipts per optimizer step
+max_steps: 200                # or set by --epochs
+use_vllm: true
+vllm_mode: colocate
+vllm_gpu_memory_utilization: 0.3
+lora: false
+eval_every: 5
+eval_examples: 100
+logging_steps: 1
+save_steps: 1000
+extra:
+  epsilon_high: 0.28
+train_vision: false
+train_projector: true

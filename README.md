@@ -25,6 +25,11 @@ detection**, where a 0.6B student that never trains on a human label beats its t
 0.934 F1), and **recommendation**, where an LLM teacher lifts a 0.5M-parameter recommender to the
 level of 1.5B-7B LLM recommenders. See [Results](#results).
 
+**Tasks with image inputs** are handled by the [vision extension](extensions/vision/README.md), which
+runs the same workflow on prompts that contain images. On receipt photos, a Qwen3-VL-2B student
+trained on the labels of its 32B teacher, kept only when the receipt's own arithmetic adds up (no
+human label), ties that teacher (0.897 vs 0.896 F1). See [Reading receipts](#images-reading-receipts-vision-extension).
+
 **Contents:** [Try it](#try-it) · [What it can be used for](#what-it-can-be-used-for) ·
 [How it works](#how-it-works) · [Add your own task](#add-your-own-task) · [Results](#results) ·
 [Install](#install) · [Hardware](#hardware) · [Reference](#reference) · [Related work](#related-work) ·
@@ -283,6 +288,24 @@ NDCG@10 .119**, on par with recent LLM recommenders (1.5B-7B parameters, HR@10 .
 of their serving size. Tables, cold-start results and the commands to reproduce:
 [tasks/rec/README.md](tasks/rec/README.md).
 
+### Images: reading receipts (vision extension)
+A Qwen3-VL-2B student reads receipt photos (CORD-v2) into JSON: items, totals, cash and change. Mean
+F1 on 200 test receipts:
+
+| Model | Human labels used | Mean F1 | Receipts read perfectly |
+|---|---|---|---|
+| Qwen3-VL-2B, untrained | 0 | 0.756 | 10.5% |
+| Qwen3-VL-32B teacher | 0 | 0.896 | 41.0% |
+| **2B, SFT on the teacher's arithmetic-checked labels** | **0** | **0.897** | **42.0%** |
+| **+ GRPO on 200 labelled receipts** | **300** | **0.905** | **49.5%** |
+| 2B, SFT on all 800 gold labels (control) | 800 | 0.928 | 58.0% |
+
+The teacher's labels give 82% of the gain that gold labels for every training receipt give (87% after
+GRPO). GRPO's mean gain is not significant (p = 0.16), but it reads 15 more receipts perfectly
+(McNemar p = 0.004). The extension adds images to every stage (teacher requests, SFT, evaluation, GRPO
+with vLLM) without changing distillops. Tables, process notes and commands:
+[extensions/vision/vision_tasks/cord/README.md](extensions/vision/vision_tasks/cord/README.md).
+
 ### Takeaways
 1. A few CNY of verified teacher reasoning replace a model's math post-training: on GSM8K, SFT takes a
    base model +6.3 points and GRPO with the same verifier as reward +1.6 more, matching Qwen's own
@@ -498,7 +521,8 @@ optimizer state and every checkpoint); disk space for what will be written is ch
 - **Distillation toolkits.** [EasyDistill](https://github.com/modelscope/easydistill) (Alibaba, EMNLP 2025
   demos) covers black-box data synthesis across text, vision-language, text-to-image and text-to-video,
   with outputs for LLaMA-Factory / ms-swift; [DistillKit](https://github.com/arcee-ai/DistillKit) focuses
-  on logit-level distillation. distillops is narrower (text tasks) and goes deeper on the training loop:
+  on logit-level distillation. distillops is narrower (text tasks, plus image prompts through its
+  [vision extension](extensions/vision/README.md)) and goes deeper on the training loop:
   verification-based rejection sampling, no-teacher controls, built-in GRPO and its diagnostics.
   Training itself runs on [TRL](https://github.com/huggingface/trl).
 - **LLM recommenders into sequential recommenders:** see [tasks/rec/README.md](tasks/rec/README.md#related-work).
@@ -519,8 +543,10 @@ scripts/          check_task.py (any task); pii_*.py: the PII example (prepare, 
 configs/          teacher, SFT and GRPO configs (example settings)
 assets/           README figures
 tests/            unit tests; no network or GPU needed
+extensions/vision/  image prompts (its own README.md, package, configs and tests), with the receipts
+                  example in vision_tasks/cord/
 ```
 `data/`, `results/`, `checkpoints/` and `cache/` are created at run time and not tracked.
 
-Data: GSM8K (MIT); OpenPII-1M by Ai4Privacy (CC-BY-4.0); MiniOneRec's preprocessed Amazon splits (Apache-2.0) of the Amazon Reviews dataset
+Data: GSM8K (MIT); OpenPII-1M by Ai4Privacy (CC-BY-4.0); CORD-v2 by NAVER Clova (CC-BY-4.0); MiniOneRec's preprocessed Amazon splits (Apache-2.0) of the Amazon Reviews dataset
 (McAuley Lab). Code: MIT.
