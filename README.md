@@ -279,6 +279,7 @@ The student beats its teacher (+1.15 points, 95% CI +0.65 to +1.67, p = 4e-5), a
 (p = 1e-9); teacher labels reach 96-97% of what full human annotation gives. Teacher calls: 17.7 CNY.
 Per-category scores, the pilot batch that shaped the teacher's instructions, leakage checks and
 the commands: [tasks/pii/README.md](tasks/pii/README.md).
+Model (the GRPO student, bf16): [Liquor-06/Qwen3-0.6B-PII-distillops](https://huggingface.co/Liquor-06/Qwen3-0.6B-PII-distillops).
 
 ### Recommendation: an LLM teacher for a deployable recommender
 A task far from math: next-item recommendation on Amazon Industrial & Scientific. A fine-tuned
