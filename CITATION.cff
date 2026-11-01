@@ -1,0 +1,25 @@
+cff-version: 1.2.0
+message: "If you use distillops, please cite it as below."
+type: software
+title: "distillops: black-box LLM distillation for any verifiable task"
+abstract: >-
+  distillops distils an API language model into a small open model for any task with a
+  verifiable answer: it collects teacher answers, keeps those that pass the task's verifier
+  (rejection sampling), fine-tunes the student (SFT), evaluates it, and runs reinforcement
+  learning (GRPO) with the task's score as reward. Only the teacher's text answers are needed,
+  never its logits.
+authors:
+  - family-names: Wu
+    given-names: Zihao
+repository-code: "https://github.com/Zihao-Wu06/distillops"
+url: "https://github.com/Zihao-Wu06/distillops"
+license: MIT
+version: 0.1.0
+keywords:
+  - knowledge distillation
+  - large language models
+  - rejection sampling
+  - supervised fine-tuning
+  - reinforcement learning
+  - GRPO
+  - small language models
