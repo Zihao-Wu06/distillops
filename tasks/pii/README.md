@@ -11,6 +11,8 @@ write its instructions, and 3 worked examples. On 2,000 held-out texts it reache
 (teacher 0.934), and the share of personal information left visible after masking falls from 73% to
 **1.9%** (teacher 3.0%). Teacher calls cost 17.7 CNY.
 
+**Model:** [Liquor-06/Qwen3-0.6B-PII-distillops](https://huggingface.co/Liquor-06/Qwen3-0.6B-PII-distillops) (the GRPO student, bf16: 0.955 F1, 1.9% leak rate).
+
 The task is one `Task` class (`tasks/pii/task.py`) plus data preparation; teacher calls, rejection
 sampling, SFT, evaluation and GRPO are the framework's.
 
