@@ -2,7 +2,7 @@
 
 # distillops
 
-### Distil any API LLM into a small model you own
+### Distil any LLM, hosted or local, into a small model you own
 
 Black-box distillation for any task whose result can be Verified.
 
@@ -21,16 +21,17 @@ Black-box distillation for any task whose result can be Verified.
 </div>
 
 <p align="center"><img src="assets/workflow.svg" width="900"
-  alt="Workflow: a Task class drives an API teacher; answers that pass verify (retried up to 3 times) become verified training rows, which train a small open model with SFT and then GRPO, using the task's score as reward"></p>
+  alt="Workflow: a Task class drives an LLM teacher (a hosted API or a local server); answers that pass verify (retried up to 3 times) become verified training rows, which train a small open model with SFT and then GRPO, using the task's score as reward"></p>
 
 ---
 
-Have a task an API LLM does well, such as extracting fields, finding personal information, solving
+Have a task a large LLM does well, such as extracting fields, finding personal information, solving
 math or reading documents? distillops turns it into a small open model that does the same job on
-your own machine. The API model, the *teacher*, answers your inputs. Your code checks every answer,
+your own machine. The large model, the *teacher*, answers your inputs. Your code checks every answer,
 and only the answers that pass become training data. A small *student* learns from them with SFT,
 then improves with reinforcement learning (GRPO) on the same metric you report. Only the teacher's
-text answers are needed, never its weights or logits, so any OpenAI-compatible API can teach.
+text answers are needed, never its weights or logits, so any model behind an OpenAI-compatible
+endpoint can teach: a hosted API, or an open model you serve yourself with vLLM or SGLang.
 
 The student can match its teacher, and sometimes beat it. A 0.6B personal-information detector
 trained without a single human label **beats the API model that taught it** (0.955 vs 0.934 F1;
@@ -56,8 +57,8 @@ on the Hugging Face hub as the student.
 
 ## Try it
 Distil DeepSeek's math reasoning into Qwen3-0.6B-Base on one 24 GB GPU (e.g. an RTX 4090), for under
-$1 of API calls. The teacher can be any OpenAI-compatible API: copy the template, set `base_url`,
-`model` and `api_key_env`, and export the key.
+$1 of API calls. The teacher can be any OpenAI-compatible endpoint, a hosted API or a model you serve
+locally (vLLM, SGLang): copy the template, set `base_url`, `model` and `api_key_env`, and export the key.
 ```bash
 git clone https://github.com/Zihao-Wu06/distillops && cd distillops
 pip install -e ".[train,dev]"
@@ -108,7 +109,7 @@ is specific to them. Any other task needs only its own `Task` class
                                     │
  1 baseline  python -m distillops eval       the untrained student: the starting point
                                     │
- 2 teacher   python -m distillops teacher    any OpenAI-compatible API answers -> verify -> retry the failed
+ 2 teacher   python -m distillops teacher    any OpenAI-compatible endpoint answers -> verify -> retry the failed
                                              ones (up to --max-attempts, default 3): rejection sampling
    control   python -m distillops labels     rows from the dataset's own labels (answers or human
                                              solutions), no teacher
@@ -372,7 +373,7 @@ the memory that is free when the run starts.
 
 | Step | Needs |
 |---|---|
-| `teacher`, `labels`, `usage` | no GPU (API calls and files) |
+| `teacher`, `labels`, `usage` | no GPU (teacher requests and files); a teacher you serve locally needs its own GPU |
 | `sft`, `eval` | a CUDA GPU; without one they run on the CPU, which is practical only for small models |
 | `grpo` with vLLM (default), pass-rate filter | Linux and a CUDA GPU; `use_vllm: false` runs anywhere, more slowly |
 
@@ -428,7 +429,7 @@ something itself (micro-batch, precision, validation source), it prints what it 
 | Field | Default | Meaning |
 |---|---|---|
 | `base_url`, `model` | required | any OpenAI-compatible endpoint (hosted API, vLLM, SGLang, ...) and model name |
-| `api_key_env` | `TEACHER_API_KEY` | environment variable holding the key (keys never go in config files) |
+| `api_key_env` | `TEACHER_API_KEY` | environment variable holding the key (keys never go in config files); a local server started without a key accepts any value |
 | `temperature` | 1.0 | > 0 so retries in rejection sampling give different answers; `null` = not sent (models that only accept their default) |
 | `max_tokens` | 1024 | per call; `null` = not sent |
 | `max_tokens_param` | `max_tokens` | request field for `max_tokens`; OpenAI's reasoning models need `max_completion_tokens` |
@@ -524,7 +525,7 @@ optimizer state and every checkpoint); disk space for what will be written is ch
 <details>
 <summary><b>What the framework handles</b></summary>
 
-- **Teacher client** (`distillops/teacher.py`): any OpenAI-compatible API; configurable concurrency,
+- **Teacher client** (`distillops/teacher.py`): any OpenAI-compatible endpoint (hosted API, vLLM, SGLang, ...); configurable concurrency,
   retries with backoff for network errors, rate limits and server errors only, an on-disk response cache
   (a re-run sends no repeated request) and a token counter.
 - **Adaptive rejection sampling** (`distillops/rejection.py`): retry only failed examples, up to
