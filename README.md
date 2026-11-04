@@ -6,7 +6,7 @@
 
 Black-box distillation for any task whose answers can be checked.
 
-**Have an API model that does your task well? Teach it to a model small enough to run on your own GPU, from its answers alone.**
+**Want a big model's results on your task? Distil it into a small local model, from its answers, never its weights.**
 
 [![tests](https://img.shields.io/github/actions/workflow/status/Zihao-Wu06/distillops/tests.yml?branch=main&style=flat-square&label=tests)](https://github.com/Zihao-Wu06/distillops/actions/workflows/tests.yml)
 [![Python 3.11 | 3.12](https://img.shields.io/badge/python-3.11%20%7C%203.12-3776ab?style=flat-square&logo=python&logoColor=white)](pyproject.toml)
@@ -25,8 +25,8 @@ Black-box distillation for any task whose answers can be checked.
 
 ---
 
-Have a task an API LLM does well, such as extracting fields, finding personal information, solving
-math or reading documents? distillops turns it into a small open model that does the same job on
+distillops turns a task that an API LLM does well, such as extracting fields, finding personal
+information, solving math or reading documents, into a small open model that does the same job on
 your own machine. The API model, the *teacher*, answers your inputs. Your code checks every answer,
 and only the answers that pass become training data. A small *student* learns from them with SFT,
 then improves with reinforcement learning (GRPO) on the same metric you report. Only the teacher's
