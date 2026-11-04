@@ -4,9 +4,9 @@
 
 ### Distil any API LLM into a small model you own
 
-Black-box distillation for any task whose answers can be checked.
+Black-box distillation for any task whose result can be Verified.
 
-**Want a big model's results on your task? Distil it into a small local model, from its answers, never its weights.**
+**Want a LLM’s results on your own task? Distil it into a small local model, from its answers, never its weights.**
 
 [![tests](https://img.shields.io/github/actions/workflow/status/Zihao-Wu06/distillops/tests.yml?branch=main&style=flat-square&label=tests)](https://github.com/Zihao-Wu06/distillops/actions/workflows/tests.yml)
 [![Python 3.11 | 3.12](https://img.shields.io/badge/python-3.11%20%7C%203.12-3776ab?style=flat-square&logo=python&logoColor=white)](pyproject.toml)
