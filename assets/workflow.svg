@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="430" viewBox="0 0 1200 430" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
-  <title>How distillops works: a Task class drives an API teacher whose answers are verified and retried; the verified rows train a small open model with SFT, then GRPO with the task's score as reward.</title>
+  <title>How distillops works: a Task class drives an LLM teacher (a hosted API or a local server) whose answers are verified and retried; the verified rows train a small open model with SFT, then GRPO with the task's score as reward.</title>
   <defs>
     <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="11" markerHeight="11" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
       <path d="M0,0 L10,5 L0,10 z" fill="#475569"/>
@@ -15,15 +15,15 @@
 
   <!-- teacher side -->
   <rect x="24" y="24" width="560" height="382" rx="14" fill="#fff7ed" stroke="#fb923c" stroke-width="2"/>
-  <text x="44" y="56" font-size="20" font-weight="700" fill="#9a3412">Teacher side (any API, text answers only)</text>
+  <text x="44" y="56" font-size="20" font-weight="700" fill="#9a3412">Teacher side (API or local, text answers only)</text>
 
   <rect x="44" y="76" width="520" height="70" rx="10" fill="#ffffff" stroke="#fdba74"/>
   <text x="304" y="104" font-size="16" font-weight="600" fill="#1f2937" text-anchor="middle">Task class (your code)</text>
   <text x="304" y="126" font-size="13" fill="#4b5563" text-anchor="middle">data · teacher prompt · verify (is this answer right?) · score (0-1)</text>
 
   <rect x="44" y="176" width="220" height="70" rx="10" fill="#ffffff" stroke="#fdba74"/>
-  <text x="154" y="204" font-size="16" font-weight="600" fill="#1f2937" text-anchor="middle">Teacher API</text>
-  <text x="154" y="226" font-size="13" fill="#4b5563" text-anchor="middle">any OpenAI-compatible model</text>
+  <text x="154" y="204" font-size="16" font-weight="600" fill="#1f2937" text-anchor="middle">Teacher LLM</text>
+  <text x="154" y="226" font-size="13" fill="#4b5563" text-anchor="middle">any OpenAI-compatible endpoint</text>
   <line x1="154" y1="148" x2="154" y2="174" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
 
   <rect x="344" y="176" width="220" height="70" rx="10" fill="#ffffff" stroke="#fdba74"/>
