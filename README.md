@@ -25,8 +25,8 @@ Black-box distillation for any task whose answers can be checked.
 
 ---
 
-distillops turns a task that an API LLM does well, such as extracting fields, finding personal
-information, solving math or reading documents, into a small open model that does the same job on
+Have a task an API LLM does well, such as extracting fields, finding personal information, solving
+math or reading documents? distillops turns it into a small open model that does the same job on
 your own machine. The API model, the *teacher*, answers your inputs. Your code checks every answer,
 and only the answers that pass become training data. A small *student* learns from them with SFT,
 then improves with reinforcement learning (GRPO) on the same metric you report. Only the teacher's
