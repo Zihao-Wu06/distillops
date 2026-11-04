@@ -18,7 +18,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import importlib
+import os
 import random
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +47,8 @@ def load_task(spec: str, task_args: list[str] | None = None) -> Any:
     module, _, cls = spec.partition(":")
     if not cls:
         raise SystemExit(f"--task must look like module.path:ClassName (got {spec!r})")
+    if os.getcwd() not in sys.path:  # the `distillops` command, unlike `python -m`, leaves it out
+        sys.path.append(os.getcwd())
     return getattr(importlib.import_module(module), cls)(**kwargs)
 
 

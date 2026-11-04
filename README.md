@@ -346,13 +346,22 @@ with vLLM) without changing distillops. Tables, process notes and commands:
    unchanged serving cost.
 
 ## Install
+For your own task, install the framework from PyPI:
+```bash
+pip install "distillops[train]"        # framework and training stack
+pip install "vllm==0.11.0"             # only for GRPO and the pass-rate filter (Linux)
+distillops doctor                      # GPU, chosen precision, free memory and disk, library versions
+```
+To run the included examples or the tests, use a clone: the example tasks, their configs and
+scripts live in the repository, not in the package.
 ```bash
 git clone https://github.com/Zihao-Wu06/distillops && cd distillops
 pip install -e ".[train,dev]"          # framework, training stack and tests
-pip install "vllm==0.11.0"             # only for GRPO and the pass-rate filter (Linux)
-python -m distillops doctor            # GPU, chosen precision, free memory and disk, library versions
+python -m distillops doctor
 python -m pytest -q                    # unit tests; no GPU or network needed
 ```
+`distillops ...` and `python -m distillops ...` are the same command; `--task module:Class` is
+imported from installed packages or from the current directory.
 Python 3.11-3.12. Tested on these setups:
 
 | Machine | Used for | torch | transformers | TRL | PEFT | vLLM |
