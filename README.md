@@ -1,39 +1,58 @@
+<div align="center">
+
 # distillops
 
-**Distil an API LLM into a small open model, for any task with a verifiable answer.**
+### Distil any API LLM into a small model you own
 
-[![tests](https://github.com/Zihao-Wu06/distillops/actions/workflows/tests.yml/badge.svg)](https://github.com/Zihao-Wu06/distillops/actions/workflows/tests.yml)
-[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![python 3.11 | 3.12](https://img.shields.io/badge/python-3.11%20%7C%203.12-blue.svg)](pyproject.toml)
+Black-box distillation for any task whose answers can be checked.
+
+**Have an API model that does your task well? Teach it to a model small enough to run on your own GPU, from its answers alone.**
+
+[![tests](https://img.shields.io/github/actions/workflow/status/Zihao-Wu06/distillops/tests.yml?branch=main&style=flat-square&label=tests)](https://github.com/Zihao-Wu06/distillops/actions/workflows/tests.yml)
+[![Python 3.11 | 3.12](https://img.shields.io/badge/python-3.11%20%7C%203.12-3776ab?style=flat-square&logo=python&logoColor=white)](pyproject.toml)
+[![inputs: text · images](https://img.shields.io/badge/inputs-text%20%C2%B7%20images-0f766e?style=flat-square)](#results)
+[![models on Hugging Face](https://img.shields.io/badge/models-Hugging%20Face-ffd21e?style=flat-square&logo=huggingface&logoColor=black)](https://huggingface.co/Liquor-06)
+[![MIT license](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
+
+[Try it](#try-it) · [How it works](#how-it-works) · [Add your own task](#add-your-own-task) · [Results](#results) · [Install](#install) · [Reference](#reference)
+
+<code>git clone https://github.com/Zihao-Wu06/distillops && cd distillops && pip install -e ".[train,dev]"</code>
+
+</div>
 
 <p align="center"><img src="assets/workflow.svg" width="900"
   alt="Workflow: a Task class drives an API teacher; answers that pass verify (retried up to 3 times) become verified training rows, which train a small open model with SFT and then GRPO, using the task's score as reward"></p>
 
-Under $1 of API calls (3.79 CNY of DeepSeek answers) takes **Qwen3-1.7B-Base from 73.8% to 81.6%** on
-GSM8K, on par with Qwen's own post-trained Qwen3-1.7B (80.2%). Training on GSM8K's human-written
-solutions to the same problems scores 68.5%: the gain comes from the teacher's verified reasoning.
+---
 
-<p align="center"><img src="assets/gsm8k_results.svg" width="820"
-  alt="GSM8K accuracy: untrained 73.8%, SFT on human solutions 68.5%, SFT on teacher reasoning 80.1%, plus GRPO 81.6%, Qwen3-1.7B 80.2%"></p>
+Have a task an API LLM does well, such as extracting fields, finding personal information, solving
+math or reading documents? distillops turns it into a small open model that does the same job on
+your own machine. The API model, the *teacher*, answers your inputs. Your code checks every answer,
+and only the answers that pass become training data. A small *student* learns from them with SFT,
+then improves with reinforcement learning (GRPO) on the same metric you report. Only the teacher's
+text answers are needed, never its weights or logits, so any OpenAI-compatible API can teach.
+
+The student can match its teacher, and sometimes beat it. A 0.6B personal-information detector
+trained without a single human label **beats the API model that taught it** (0.955 vs 0.934 F1;
+[details](#personal-information-detection-a-student-that-beats-its-teacher)). A 1.7B base model
+**reaches the math accuracy of Qwen's own post-trained Qwen3-1.7B**
+([details](#math-gsm8k-qwen3-17b-base-student-all-1319-test-problems)). A 2B vision model **ties its
+32B teacher** at reading receipt photos ([vision extension](extensions/vision/README.md)). A
+0.5M-parameter recommender **matches LLM recommenders** about 1,500 times its size
+([details](#recommendation-an-llm-teacher-for-a-deployable-recommender)).
+
+Every gain is measured against a control, not assumed. Each example also trains the same student
+on the dataset's own labels with no teacher, so you can see what the teacher itself added. The math,
+PII and receipt comparisons are paired over the same test set, with 95% confidence intervals.
 
 You describe a task once, in a `Task` class: its data, prompts, a verifier and a score. The same
-commands then collect verified teacher answers, fine-tune, evaluate and run reinforcement learning
-(GRPO). Only the teacher's text answers are needed, never its logits, so any API model can teach.
+commands then collect verified teacher answers, fine-tune, evaluate and run GRPO, for any causal LM
+on the Hugging Face hub as the student.
 
-**Three worked examples**, chosen to be very different: math (above), **personal-information
-detection**, where a 0.6B student that never trains on a human label beats its teacher (0.955 vs
-0.934 F1), and **recommendation**, where an LLM teacher lifts a 0.5M-parameter recommender to the
-level of 1.5B-7B LLM recommenders. See [Results](#results).
-
-**Tasks with image inputs** are handled by the [vision extension](extensions/vision/README.md), which
-runs the same workflow on prompts that contain images. On receipt photos, a Qwen3-VL-2B student
-trained on the labels of its 32B teacher, kept only when the receipt's own arithmetic adds up (no
-human label), ties that teacher (0.897 vs 0.896 F1). See [Reading receipts](#images-reading-receipts-vision-extension).
-
-**Contents:** [Try it](#try-it) · [What it can be used for](#what-it-can-be-used-for) ·
-[How it works](#how-it-works) · [Add your own task](#add-your-own-task) · [Results](#results) ·
-[Install](#install) · [Hardware](#hardware) · [Reference](#reference) · [Related work](#related-work) ·
-[Layout](#layout)
+**Released models:** [GSM8K, Qwen3-1.7B-Base](https://huggingface.co/Liquor-06/Qwen3-1.7B-Base-GSM8K-distillops)
+([teacher data: 7,274 verified answers](https://huggingface.co/datasets/Liquor-06/gsm8k-deepseek-verified))
+· [PII, Qwen3-0.6B](https://huggingface.co/Liquor-06/Qwen3-0.6B-PII-distillops)
+· [recommendation, SASRec](https://huggingface.co/Liquor-06/SASRec-TwoStage-Industrial-distillops)
 
 ## Try it
 Distil DeepSeek's math reasoning into Qwen3-0.6B-Base on one 24 GB GPU (e.g. an RTX 4090), for under
@@ -57,7 +76,7 @@ calls cost 3.79 CNY (~$0.53); `python -m distillops usage --teacher configs/my_t
 tokens. Measured on an RTX PRO 6000 with GPU memory capped at 24 GB: SFT took 7 minutes and peaked at
 14 GB allocated (23 GB reserved); slower cards take longer. The same commands work for your own task
 once it has a `Task` class ([Add your own task](#add-your-own-task)); [Results](#results) has the
-1.7B route behind the chart above, with GRPO on top.
+1.7B route, with GRPO on top.
 
 ## What it can be used for
 The one requirement: given an input and an output, your code can say whether the output is right
@@ -213,6 +232,9 @@ how well; their code lives in `tasks/` and is not needed for your own task.
 | **+ GRPO (1 epoch, reward = `Task.score`)** | **81.6%** |
 | *Qwen3-1.7B: Qwen's own post-trained model, for reference* | *80.2%* |
 
+<p align="center"><img src="assets/gsm8k_results.svg" width="820"
+  alt="GSM8K accuracy: untrained 73.8%, SFT on human solutions 68.5%, SFT on teacher reasoning 80.1%, plus GRPO 81.6%, Qwen3-1.7B 80.2%"></p>
+
 Teacher: DeepSeek Flash, 7,274 of 7,473 problems accepted (97.3%), **3.79 CNY**. The student is a base
 model, which has seen no post-training on math, so the gain is the distillation's own. Paired over
 the 1,319 problems: SFT adds **+6.3 points** (95% CI +3.9 to +8.6, p < 1e-6) and GRPO with the same
@@ -288,6 +310,7 @@ embeddings + top-3 soft labels) for SASRec. Two ~0.5M-parameter SASRecs then rea
 NDCG@10 .119**, on par with recent LLM recommenders (1.5B-7B parameters, HR@10 .159-.163) at ~1/1,500
 of their serving size. Tables, cold-start results and the commands to reproduce:
 [tasks/rec/README.md](tasks/rec/README.md).
+Model (both SASRecs, ~0.8M parameters, plain PyTorch): [Liquor-06/SASRec-TwoStage-Industrial-distillops](https://huggingface.co/Liquor-06/SASRec-TwoStage-Industrial-distillops).
 
 ### Images: reading receipts (vision extension)
 A Qwen3-VL-2B student reads receipt photos (CORD-v2) into JSON: items, totals, cash and change. Mean
